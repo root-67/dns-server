@@ -14,10 +14,10 @@ RUN CGO_ENABLED=0 GOOS=linux \
 
 FROM alpine:latest
 
-LABEL org.opencontainers.image.title="67-Host-Admin" \
-LABEL org.opencontainers.image.description="Homelab DNS 67" \
-LABEL org.opencontainers.image.source="https://github.com/root-67/hostadmin" \
-LABEL org.opencontainers.image.url="https://github.com/root-67/hostadmin" \
+LABEL org.opencontainers.image.title="67-Host-Admin"
+LABEL org.opencontainers.image.description="Homelab DNS 67"
+LABEL org.opencontainers.image.source="https://github.com/root-67/dns-server"
+LABEL org.opencontainers.image.url="https://github.com/root-67/dns-server" \
 LABEL org.opencontainers.image.licenses="MIT"
 
 RUN apk add --no-cache ca-certificates tzdata \
