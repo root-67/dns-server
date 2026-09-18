@@ -1,0 +1,190 @@
+{{ define "admin/group/form" }}
+<!--begin::App Wrapper-->
+<div class="app-wrapper">
+    {{ template "partials/header-navigation" .}}
+    {{ template "partials/sidebar-navigation" .}}
+    <!--begin::App Main-->
+    <main class="app-main">
+        <!--begin::App Content Header-->
+        <div class="app-content-header">
+            <div class="container-fluid">
+                <div class="row">
+                    <div class="col-sm-6">
+                        <h3 class="mb-0">{{ if .IsCreate }}New Group{{ else }}Edit Group{{ end }}</h3>
+                    </div>
+                    <div class="col-sm-6">
+                        <ol class="breadcrumb float-sm-end">
+                            {{ if .Navigation }}
+                                {{ range .Navigation.Breadcrumbs }}
+                                    {{ if .Active }}
+                                        <li class="breadcrumb-item active" aria-current="page">{{ .Title }}</li>
+                                    {{ else }}
+                                        <li class="breadcrumb-item"><a href="{{ .URL }}">{{ .Title }}</a></li>
+                                    {{ end }}
+                                {{ end }}
+                            {{ end }}
+                        </ol>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!--end::App Content Header-->
+
+        <!--begin::App Content-->
+        <div class="app-content">
+            <div class="container-fluid">
+                {{ if .Error }}
+                <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                    {{ .Error }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+                {{ end }}
+
+                <!--begin::Card-->
+                <div class="card card-outline card-primary shadow">
+                    <div class="card-header">
+                        <h3 class="card-title">{{ if .IsCreate }}Create a new group{{ else }}Update group details{{ end }}</h3>
+                        <div class="card-tools">
+                            <a href="/admin/group" class="btn btn-sm btn-outline-secondary">Back to list</a>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <p class="text-muted small mb-4">
+                            • Name is required. • For external sources (OIDC/LDAP), set the External ID. • Select users to add them to this group. • Optionally map a role so members inherit its permissions.
+                        </p>
+
+                        {{ $isExternal := and (not .IsCreate) .IsExternal }}
+                        {{ if $isExternal }}
+                        <div class="alert alert-info d-flex align-items-center" role="alert">
+                            <i class="bi bi-info-circle me-2"></i>
+                            <div>
+                                This is an externally-synced <strong>{{ .Group.Source }}</strong> group. Its source, external ID and membership are managed by the directory and reconciled on login — edit the role mapping and zone tags here.
+                            </div>
+                        </div>
+                        {{ end }}
+
+                        <form method="post" action="{{ if .IsCreate }}/admin/group{{ else }}/admin/group/{{ .Group.ID }}{{ end }}">
+                            <div class="row g-3">
+                                <div class="col-md-6">
+                                    <label for="name" class="form-label">Name</label>
+                                    <input type="text" class="form-control" id="name" name="name" value="{{ .Group.Name }}" required maxlength="255">
+                                </div>
+
+                                <div class="col-md-6">
+                                    <label for="role_id" class="form-label">Role</label>
+                                    <select id="role_id" name="role_id" class="form-select">
+                                        <option value="0" {{ if eq $.MappedRoleID 0 }}selected{{ end }}>— No role —</option>
+                                        {{ range .Roles }}
+                                            <option value="{{ .ID }}" {{ if eq $.MappedRoleID .ID }}selected{{ end }}>{{ .Name }}{{ if .Description }} - {{ .Description }}{{ end }}</option>
+                                        {{ end }}
+                                    </select>
+                                    <div class="form-text">Members of this group will inherit this role's permissions. Leave unset if no role mapping is needed.</div>
+                                </div>
+
+                                <div class="col-md-6">
+                                    <label for="source" class="form-label">Source</label>
+                                    <select id="source" name="source" class="form-select" {{ if $isExternal }}disabled{{ end }}>
+                                        <option value="local" {{ if eq .Group.Source "local" }}selected{{ end }}>Local</option>
+                                        <option value="oidc" {{ if eq .Group.Source "oidc" }}selected{{ end }}>OIDC</option>
+                                        <option value="ldap" {{ if eq .Group.Source "ldap" }}selected{{ end }}>LDAP</option>
+                                    </select>
+                                    {{ if $isExternal }}<div class="form-text">Locked — managed by the directory.</div>{{ end }}
+                                </div>
+
+                                <div class="col-md-6">
+                                    <label for="external_id" class="form-label">External ID</label>
+                                    <input type="text" class="form-control" id="external_id" name="external_id" value="{{ .Group.ExternalID }}" maxlength="512" placeholder="External identifier (DN for LDAP, claim for OIDC)" {{ if $isExternal }}readonly{{ end }}>
+                                    <div id="external-id-help" class="form-text">{{ if $isExternal }}Locked — managed by the directory.{{ else }}Optional. Required when source is external.{{ end }}</div>
+                                </div>
+
+                                <div class="col-md-6">
+                                    <label for="description" class="form-label">Description</label>
+                                    <input type="text" class="form-control" id="description" name="description" value="{{ .Group.Description }}" maxlength="255">
+                                </div>
+
+                                <div class="col-md-12">
+                                    <label class="form-label">Group Members</label>
+                                    <div id="group-members-box" class="border rounded p-3" style="max-height: 300px; overflow-y: auto;">
+                                        {{ if $isExternal }}
+                                            {{ $selectedIDs := .SelectedIDs }}
+                                            {{ $hasMembers := false }}
+                                            {{ range .Users }}
+                                                {{ $userID := .ID }}
+                                                {{ $username := .Username }}
+                                                {{ $email := .Email }}
+                                                {{ range $selectedIDs }}
+                                                    {{ if eq . $userID }}
+                                                        {{ $hasMembers = true }}
+                                                        <div class="form-check">
+                                                            <input class="form-check-input" type="checkbox" id="member-{{ $userID }}" checked disabled>
+                                                            <label class="form-check-label" for="member-{{ $userID }}">
+                                                                {{ $username }} <small class="text-muted">({{ $email }})</small>
+                                                            </label>
+                                                        </div>
+                                                    {{ end }}
+                                                {{ end }}
+                                            {{ end }}
+                                            {{ if not $hasMembers }}
+                                                <p class="text-muted mb-0">No members synced yet. Membership is populated when a matching user logs in.</p>
+                                            {{ end }}
+                                        {{ else if .Users }}
+                                            {{ $selectedIDs := .SelectedIDs }}
+                                            {{ range .Users }}
+                                                {{ $userID := .ID }}
+                                                {{ $isSelected := false }}
+                                                {{ range $selectedIDs }}
+                                                    {{ if eq . $userID }}
+                                                        {{ $isSelected = true }}
+                                                    {{ end }}
+                                                {{ end }}
+                                                <div class="form-check">
+                                                    <input class="form-check-input" type="checkbox" name="user_ids" value="{{ .ID }}" id="user-{{ .ID }}" {{ if $isSelected }}checked{{ end }}>
+                                                    <label class="form-check-label" for="user-{{ .ID }}">
+                                                        {{ .Username }} <small class="text-muted">({{ .Email }})</small>
+                                                    </label>
+                                                </div>
+                                            {{ end }}
+                                        {{ else }}
+                                            <p class="text-muted mb-0">No users available</p>
+                                        {{ end }}
+                                    </div>
+                                    <div id="group-members-external-note" class="alert alert-info py-2 px-3 mt-2 d-none" role="alert">
+                                        Members of external (LDAP/OIDC) groups are managed by the directory and synced on login — any selection here is ignored.
+                                    </div>
+                                    <div id="group-members-help" class="form-text">{{ if $isExternal }}Membership is managed by {{ .Group.Source }} and synced on login.{{ else }}Select users who should be members of this group{{ end }}</div>
+                                </div>
+                            </div>
+
+                            {{ if .AllTags }}
+                            <div class="mt-4">
+                                <label class="form-label fw-semibold">Zone Access Tags</label>
+                                <div class="form-text mb-2">Assign tags to restrict this group to specific zones. Leave all unchecked for unrestricted access.</div>
+                                {{ range .AllTags }}
+                                <div class="form-check form-check-inline mb-1" style="min-width:160px">
+                                    <input class="form-check-input" type="checkbox" name="tag_ids" id="gtag_{{ .ID }}" value="{{ .ID }}"
+                                        {{ if index $.AssignedSet .ID }}checked{{ end }}>
+                                    <label class="form-check-label" for="gtag_{{ .ID }}">
+                                        <span class="badge text-bg-info">{{ .Name }}</span>
+                                    </label>
+                                </div>
+                                {{ end }}
+                            </div>
+                            {{ end }}
+
+                            <div class="d-flex gap-2 mt-4">
+                                <button type="submit" class="btn btn-primary">{{ if .IsCreate }}Create{{ else }}Update{{ end }}</button>
+                                <a href="/admin/group" class="btn btn-secondary">Cancel</a>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+                <!--end::Card-->
+            </div>
+        </div>
+        <!--end::App Content-->
+    </main>
+    <!--end::App Main-->
+</div>
+<!--end::App Wrapper-->
+<script src="/static/js/group-form.js"></script>
+{{ end }}

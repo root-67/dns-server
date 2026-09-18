@@ -1,0 +1,361 @@
+package login
+
+import (
+	"errors"
+
+	"github.com/gofiber/fiber/v3"
+	"github.com/rs/zerolog/log"
+	"gorm.io/gorm"
+
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/activitylog"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/auth"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/config"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/db/models"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/version"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/web/handler"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/web/handler/dashboard"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/web/session"
+)
+
+const (
+	// Path is the path to the login page.
+	Path = handler.RootPath + "login"
+
+	// TemplateName is the name of the login template.
+	TemplateName = "login/login"
+
+	// AuthTypeCookie is the name of the long-lived cookie that remembers the
+	// last authentication method the user chose (e.g. "local" or "ldap").
+	// It is set on every successful login and persists across sessions so the
+	// login page can pre-select the same method after logout.
+	AuthTypeCookie = "auth_type"
+
+	// authTypeCookieMaxAge is one year in seconds.
+	authTypeCookieMaxAge = 365 * 24 * 60 * 60
+)
+
+// Service is the login handler service.
+type Service struct {
+	handler.Service
+	cfg         *config.Config
+	db          *gorm.DB
+	localAuth   *auth.LocalProvider
+	ldapAuth    *auth.LDAPProvider
+	authService *auth.Service
+}
+
+// Handler is the login handler.
+var Handler = Service{}
+
+// Init initializes the login handler.
+func (s *Service) Init(app *fiber.App, cfg *config.Config, db *gorm.DB) {
+	if app == nil || cfg == nil || db == nil {
+		log.Fatal().Msg(handler.ErrNilACDFatalLogMsg)
+		return
+	}
+
+	s.db = db
+	s.cfg = cfg
+
+	// Initialize auth providers
+	s.localAuth = auth.NewLocalProvider(db)
+	s.authService = auth.NewService(db)
+
+	// Initialize LDAP provider if enabled
+	s.initLDAP()
+
+	// register routes
+	app.Route(Path, func(router fiber.Router) {
+		router.Get(handler.RootPath, s.Get)
+		router.Post(handler.RootPath, s.Post)
+	})
+}
+
+// initLDAP initializes the LDAP auth provider when enabled, using guard clauses to reduce nesting.
+func (s *Service) initLDAP() {
+	if !s.cfg.Auth.LDAP.Enabled {
+		return
+	}
+
+	ldapCfg := s.cfg.Auth.LDAP
+	ldapConfig := auth.LDAPConfig{
+		Enabled:          ldapCfg.Enabled,
+		Host:             ldapCfg.Host,
+		Port:             ldapCfg.Port,
+		UseSSL:           ldapCfg.UseSSL,
+		UseTLS:           ldapCfg.UseTLS,
+		SkipVerify:       ldapCfg.SkipVerify,
+		BindDN:           ldapCfg.BindDN,
+		BindPassword:     ldapCfg.BindPassword,
+		BaseDN:           ldapCfg.BaseDN,
+		UserFilter:       ldapCfg.UserFilter,
+		GroupBaseDN:      ldapCfg.GroupBaseDN,
+		GroupFilter:      ldapCfg.GroupFilter,
+		GroupMemberAttr:  ldapCfg.GroupMemberAttr,
+		UsernameAttr:     ldapCfg.UsernameAttr,
+		EmailAttr:        ldapCfg.EmailAttr,
+		FirstNameAttr:    ldapCfg.FirstNameAttr,
+		LastNameAttr:     ldapCfg.LastNameAttr,
+		GroupNameAttr:    ldapCfg.GroupNameAttr,
+		Timeout:          ldapCfg.Timeout,
+		SearchAttributes: ldapCfg.SearchAttrs,
+	}
+
+	ldapProvider, err := auth.NewLDAPProvider(&ldapConfig, s.db)
+	if err != nil {
+		if errors.Is(err, auth.ErrLDAPDisabled) {
+			log.Info().Msg("LDAP authentication is disabled by configuration")
+			return
+		}
+
+		log.Warn().Err(err).Msg("Failed to initialize LDAP provider - LDAP authentication will be disabled")
+
+		return
+	}
+
+	s.ldapAuth = ldapProvider
+
+	log.Info().Msg("LDAP authentication provider initialized")
+}
+
+// Get handles the login page rendering.
+func (s *Service) Get(c fiber.Ctx) error {
+	return c.Render(TemplateName, fiber.Map{
+		"local_db_enabled": s.cfg.Auth.LocalDB.Enabled,
+		"ldap_enabled":     s.cfg.Auth.LDAP.Enabled,
+		"oidc_enabled":     s.cfg.Auth.OIDC.Enabled,
+		"version":          version.Get(),
+		"auth_type":        c.Cookies(AuthTypeCookie),
+	})
+}
+
+// Post handles the login form submission.
+func (s *Service) Post(c fiber.Ctx) error {
+	type LoginForm struct {
+		Username string `form:"username"`
+		Password string `form:"password"`
+		AuthType string `form:"auth_type"` // "local", "ldap"
+	}
+
+	form := new(LoginForm)
+	if err := c.Bind().Body(form); err != nil {
+		return s.renderError(c, "", "", ErrInvalidFormData.Error())
+	}
+
+	// Resolve and validate authentication type
+	authType, err := s.pickAuthType(form.AuthType)
+	if err != nil {
+		return s.renderError(c, form.Username, form.AuthType, err.Error())
+	}
+
+	// Authenticate a user according to the selected auth type
+	authenticatedUser, err := s.authenticate(authType, form.Username, form.Password)
+	if err != nil {
+		activitylog.Record(
+			&activitylog.Entry{
+				DB:           s.db,
+				Username:     form.Username,
+				Action:       activitylog.ActionLoginFailed,
+				ResourceType: activitylog.ResourceTypeAuth,
+				Details:      map[string]any{"auth_type": authType, "reason": err.Error()},
+				IPAddress:    c.IP(),
+			},
+		)
+
+		return s.renderError(c, form.Username, form.AuthType, err.Error())
+	}
+
+	log.Info().Str("username", authenticatedUser.Username).Str("auth_type", authType).
+		Msg("User logged in successfully")
+
+	userID := authenticatedUser.ID
+	activitylog.Record(
+		&activitylog.Entry{
+			DB:     s.db,
+			UserID: &userID, Username: authenticatedUser.Username,
+			Action:       activitylog.ActionLogin,
+			ResourceType: activitylog.ResourceTypeAuth,
+			Details:      map[string]any{"auth_type": authType},
+			IPAddress:    c.IP(),
+		},
+	)
+
+	// TOTP only applies to local accounts
+	if authenticatedUser.AuthSource == models.AuthSourceLocal && authenticatedUser.TOTPEnabled {
+		if err := s.createPendingSessionAndSetCookie(c, authenticatedUser, authType); err != nil {
+			return s.renderError(c, form.Username, form.AuthType, ErrInternalServerError.Error())
+		}
+
+		return c.Redirect().To("/auth/totp/verify")
+	}
+
+	if authenticatedUser.AuthSource == models.AuthSourceLocal && authenticatedUser.TOTPRequired {
+		if err := s.createPendingSessionAndSetCookie(c, authenticatedUser, authType); err != nil {
+			return s.renderError(c, form.Username, form.AuthType, ErrInternalServerError.Error())
+		}
+
+		return c.Redirect().To("/profile/totp/setup")
+	}
+
+	// Standard login — no TOTP needed
+	if err := s.createSessionAndSetCookie(c, authenticatedUser, authType); err != nil {
+		return s.renderError(c, form.Username, form.AuthType, ErrInternalServerError.Error())
+	}
+
+	return c.Redirect().To(dashboard.Path)
+}
+
+// renderError renders the login page with an error message, preserving the submitted username and auth type.
+func (s *Service) renderError(c fiber.Ctx, username, authType, errorMsg string) error {
+	return c.Render(TemplateName, fiber.Map{
+		"local_db_enabled": s.cfg.Auth.LocalDB.Enabled,
+		"ldap_enabled":     s.cfg.Auth.LDAP.Enabled,
+		"oidc_enabled":     s.cfg.Auth.OIDC.Enabled,
+		"error":            errorMsg,
+		"username":         username,
+		"auth_type":        authType,
+		"version":          version.Get(),
+	})
+}
+
+// pickAuthType determines which authentication method to use based on the request
+// and the configuration. Returns an error when no suitable method is available
+// or when an unsupported method is requested.
+func (s *Service) pickAuthType(requested string) (string, error) {
+	if requested == "" {
+		if s.cfg.Auth.LocalDB.Enabled {
+			return "local", nil
+		}
+
+		if s.cfg.Auth.LDAP.Enabled {
+			return "ldap", nil
+		}
+
+		return "", ErrNoAuthMethod
+	}
+
+	switch requested {
+	case "local":
+		if !s.cfg.Auth.LocalDB.Enabled {
+			return "", ErrLocalAuthDisabled
+		}
+
+		return "local", nil
+	case "ldap":
+		if !s.cfg.Auth.LDAP.Enabled || s.ldapAuth == nil {
+			return "", ErrLDAPAuthDisabled
+		}
+
+		return "ldap", nil
+	default:
+		return "", ErrInvalidAuthMethod
+	}
+}
+
+// authenticate performs the actual authentication using the selected method.
+// It also takes care of LDAP group synchronization when applicable.
+func (s *Service) authenticate(authType, username, password string) (*models.User, error) {
+	switch authType {
+	case "local":
+		user, err := s.localAuth.Authenticate(username, password)
+		if err != nil {
+			log.Error().Err(err).Str("username", username).Msg("Local authentication failed")
+			return nil, ErrInvalidCredentials
+		}
+
+		return user, nil
+	case "ldap":
+		user, groups, err := s.ldapAuth.Authenticate(username, password)
+		if err != nil {
+			log.Error().Err(err).Str("username", username).Msg("LDAP authentication failed")
+			return nil, ErrInvalidCredentials
+		}
+
+		if err = s.authService.SyncUserGroups(user.ID, groups, models.GroupSourceLDAP); err != nil {
+			log.Error().Err(err).Uint64("user_id", user.ID).Msg("Failed to sync LDAP groups")
+		}
+
+		return user, nil
+	default:
+		return nil, ErrInvalidAuthMethod
+	}
+}
+
+// createSessionAndSetCookie creates a user session, writes it to the store,
+// and sets the corresponding session cookie on the response.
+// It also sets a long-lived auth_type cookie so the login page can pre-select
+// the same authentication method after the user logs out.
+func (s *Service) createSessionAndSetCookie(c fiber.Ctx, user *models.User, authType string) error {
+	sessionID, err := session.GenerateSessionID()
+	if err != nil {
+		log.Error().Err(err).Msg("failed to generate session ID")
+		return err
+	}
+
+	userSession := &session.Data{User: *user}
+	if err := userSession.Write(sessionID, s.cfg.Webserver.Session.ExpiryTime); err != nil {
+		log.Error().Err(err).Msg("failed to write session")
+		return err
+	}
+
+	secure := !s.cfg.DevMode
+
+	c.Cookie(&fiber.Cookie{
+		Name:     "session",
+		Value:    sessionID,
+		MaxAge:   int(s.cfg.Webserver.Session.ExpiryTime.Seconds()),
+		Secure:   secure,
+		HTTPOnly: true,
+		SameSite: "Lax",
+	})
+
+	c.Cookie(&fiber.Cookie{
+		Name:     AuthTypeCookie,
+		Value:    authType,
+		MaxAge:   authTypeCookieMaxAge,
+		Secure:   secure,
+		HTTPOnly: true,
+		SameSite: "Lax",
+	})
+
+	return nil
+}
+
+// createPendingSessionAndSetCookie creates a TOTP-pending session.
+// It also sets a long-lived auth_type cookie so the login page can pre-select
+// the same authentication method after the user logs out.
+func (s *Service) createPendingSessionAndSetCookie(c fiber.Ctx, user *models.User, authType string) error {
+	sessionID, err := session.GenerateSessionID()
+	if err != nil {
+		log.Error().Err(err).Msg("failed to generate session ID")
+		return err
+	}
+
+	userSession := &session.Data{User: *user, TOTPPending: true}
+	if err := userSession.Write(sessionID, s.cfg.Webserver.Session.ExpiryTime); err != nil {
+		log.Error().Err(err).Msg("failed to write pending session")
+		return err
+	}
+
+	secure := !s.cfg.DevMode
+
+	c.Cookie(&fiber.Cookie{
+		Name:     "session",
+		Value:    sessionID,
+		MaxAge:   int(s.cfg.Webserver.Session.ExpiryTime.Seconds()),
+		Secure:   secure,
+		HTTPOnly: true,
+		SameSite: "Lax",
+	})
+
+	c.Cookie(&fiber.Cookie{
+		Name:     AuthTypeCookie,
+		Value:    authType,
+		MaxAge:   authTypeCookieMaxAge,
+		Secure:   secure,
+		HTTPOnly: true,
+		SameSite: "Lax",
+	})
+
+	return nil
+}

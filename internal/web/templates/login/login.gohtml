@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <!--begin::Head-->
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>Log In | GoPowerDNS-Admin {{- /*gotype: models.Users*/}}</title>
+    <!--begin::Accessibility Meta Tags-->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#007bff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#1a1a1a" media="(prefers-color-scheme: dark)" />
+    <!--end::Accessibility Meta Tags-->
+    <!--begin::Primary Meta Tags-->
+    <meta name="title" content="PowerDNS-Admin | Login Page" />
+    <meta name="description" content="PowerDNS-Admin Login Page" />
+    <!--end::Primary Meta Tags-->
+    <link rel="icon" href="{{.Brand.FaviconURL}}" type="image/svg+xml">
+    <link rel="icon" href="{{.Brand.FaviconPNGURL}}" type="image/png">
+    <!--begin::Fonts-->
+    <link rel="stylesheet" href="/static/vendor/source-sans-3-5.2.9/index.css"/>
+    <!--end::Fonts-->
+    <!--begin::Third Party Plugin(Bootstrap Icons)-->
+    <link rel="stylesheet" href="/static/vendor/bootstrap-icons-1.13.1/font/bootstrap-icons.min.css"/>
+    <!--end::Third Party Plugin(Bootstrap Icons)-->
+    <!--begin::Required Plugin(AdminLTE)-->
+    <link rel="stylesheet" href="/static/vendor/adminlte-v4/css/adminlte.min.css" />
+    <!--end::Required Plugin(AdminLTE)-->
+  </head>
+  <!--end::Head-->
+  <!--begin::Body-->
+  <body class="login-page bg-body-secondary">
+    <div class="login-box">
+      <div class="login-logo">
+        <a href="#">{{.Brand.Name}}</a>
+      </div>
+      <!-- /.login-logo -->
+      <div class="card">
+        <div class="card-body login-card-body">
+          <p class="login-box-msg">Sign in to start your session</p>
+
+          {{ if .error }}
+          <div class="alert alert-danger alert-dismissible">
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            {{ .error }}
+          </div>
+          {{ end }}
+
+          {{ if .oidc_enabled }}
+          <div class="mb-3">
+            <a href="/auth/oidc/login" class="btn btn-outline-primary w-100">
+              <span class="bi bi-box-arrow-in-right me-1"></span> Sign in with SSO
+            </a>
+          </div>
+          {{ if or .ldap_enabled .local_db_enabled }}
+          <hr class="my-3">
+          {{ end }}
+          {{ end }}
+
+          {{ if or .ldap_enabled .local_db_enabled }}
+          <form action="" method="post">
+            <input type="hidden" name="_csrf_token" value="">
+
+            <div class="input-group mb-3">
+              <input type="text" class="form-control" placeholder="Username" name="username"
+                     required autofocus value="{{ .username }}">
+              <div class="input-group-text"><span class="bi bi-person"></span></div>
+            </div>
+
+            <div class="input-group mb-3">
+              <input type="password" class="form-control" placeholder="Password" name="password" required>
+              <div class="input-group-text"><span class="bi bi-lock-fill"></span></div>
+            </div>
+
+            {{ if .otp_field_enabled }}
+            <div class="input-group mb-3">
+              <input type="text" class="form-control" placeholder="OTP Token" name="otptoken"
+                     autocomplete="off">
+              <div class="input-group-text"><span class="bi bi-shield-lock"></span></div>
+            </div>
+            {{ end }}
+
+            {{ if and .ldap_enabled .local_db_enabled }}
+            <div class="mb-3">
+              <select class="form-select" name="auth_type">
+                <option value="local" {{ if ne .auth_type "ldap" }}selected{{ end }}>LOCAL Authentication</option>
+                <option value="ldap" {{ if eq .auth_type "ldap" }}selected{{ end }}>LDAP Authentication</option>
+              </select>
+            </div>
+            {{ else if .ldap_enabled }}
+            <input type="hidden" name="auth_type" value="ldap">
+            {{ else }}
+            <input type="hidden" name="auth_type" value="local">
+            {{ end }}
+
+            <!--begin::Row-->
+            <div class="row">
+              <div class="col-8">
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" value="" id="remember" name="remember">
+                  <label class="form-check-label" for="remember">Remember Me</label>
+                </div>
+              </div>
+              <!-- /.col -->
+              <div class="col-4">
+                <div class="d-grid gap-2">
+                  <button type="submit" class="btn btn-primary">Sign In</button>
+                </div>
+              </div>
+              <!-- /.col -->
+            </div>
+            <!--end::Row-->
+          </form>
+          {{ end }}
+        </div>
+        <!-- /.login-card-body -->
+      </div>
+    </div>
+    <!-- /.login-box -->
+    <div class="text-center pt-3">
+      <a href="https://github.com/GoPowerDNS-Admin/GoPowerDNS-Admin" target="_blank" class="text-decoration-none text-muted d-inline-flex align-items-center gap-2">
+        <img src="/static/img/gopher.svg" alt="Go Gopher" height="32">
+        <span><small>{{ .version }}</small></span>
+      </a>
+    </div>
+    <!--begin::Required Plugin(Bootstrap 5)-->
+    <script
+      src="/static/vendor/bootstrap-5.3.8-dist/js/bootstrap.bundle.min.js"
+      crossorigin="anonymous"
+    ></script>
+    <!--end::Required Plugin(Bootstrap 5)-->
+    <!--begin::Required Plugin(AdminLTE)-->
+    <script src="/static/vendor/adminlte-v4/js/adminlte.min.js"></script>
+    <!--end::Required Plugin(AdminLTE)-->
+  </body>
+  <!--end::Body-->
+</html>

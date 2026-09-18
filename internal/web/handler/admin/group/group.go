@@ -1,0 +1,643 @@
+// Package group provides handlers for managing user groups (CRUD) in admin area.
+package group
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+
+	"github.com/go-playground/validator/v10"
+	"github.com/gofiber/fiber/v3"
+	"github.com/rs/zerolog/log"
+	"gorm.io/gorm"
+
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/auth"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/config"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/db/models"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/web/handler"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/web/handler/dashboard"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/web/navigation"
+)
+
+const (
+	// Path is the base path for group management.
+	Path = handler.RootPath + "admin/group"
+
+	// TemplateList is the template for listing groups.
+	TemplateList = "admin/group/list"
+	// TemplateForm is the template for creating/updating a group.
+	TemplateForm = "admin/group/form"
+
+	// DefaultPageSize for pagination.
+	DefaultPageSize = 25
+	// MaxPageSize clamps the page size upper bound.
+	MaxPageSize = 100
+
+	// NavSectionAdmin is the top-level navigation section name for admin screens.
+	NavSectionAdmin = "admin"
+	// NavEntityGroup is the navigation entity key used for groups in the admin area.
+	NavEntityGroup = "group"
+
+	// TitleGroups is the page title for the groups list.
+	TitleGroups = "Groups"
+	// TitleNewGroup is the page title for creating a new group.
+	TitleNewGroup = "New Group"
+	// TitleEditGroup is the page title for editing an existing group.
+	TitleEditGroup = "Edit Group"
+
+	// BreadcrumbHomeLbl is the label for the home breadcrumb.
+	BreadcrumbHomeLbl = "Home"
+	// BreadcrumbAdminLbl is the label for the admin breadcrumb.
+	BreadcrumbAdminLbl = "Admin"
+	// BreadcrumbGroupsLbl is the label for the groups list breadcrumb.
+	BreadcrumbGroupsLbl = "Groups"
+	// BreadcrumbNewLbl is the label for the "new" breadcrumb.
+	BreadcrumbNewLbl = "New"
+	// BreadcrumbEditLbl is the label for the "edit" breadcrumb.
+	BreadcrumbEditLbl = "Edit"
+
+	// HrefHash represents a non-navigating link target (placeholder "#").
+	HrefHash = "#"
+
+	// QueryPage is the query parameter name for the current page index.
+	QueryPage = "page"
+	// QueryPageSize is the query parameter name for the page size.
+	QueryPageSize = "pageSize"
+	// QuerySearch is the query parameter name for the search term.
+	QuerySearch = "search"
+
+	// ErrInvalidID is returned when the provided id parameter is invalid or non-positive.
+	ErrInvalidID = "Invalid id"
+	// ErrGroupNotFound is returned when a group with the given id does not exist.
+	ErrGroupNotFound = "Group not found"
+	// ErrFailedLoadGroup indicates an unexpected error occurred while loading a single group.
+	ErrFailedLoadGroup = "Failed to load group"
+	// ErrFailedLoadGroups indicates an unexpected error occurred while loading multiple groups.
+	ErrFailedLoadGroups = "Failed to load groups"
+	// ErrFailedCreateGroup indicates the create operation failed, e.g. due to uniqueness constraints.
+	ErrFailedCreateGroup = "Failed to create group (possibly duplicate external id with same source)"
+	// ErrFailedUpdateGroup indicates the update operation failed, e.g. due to uniqueness constraints.
+	ErrFailedUpdateGroup = "Failed to update group (check uniqueness constraints)"
+	// ErrFailedDeleteGroup indicates the delete operation failed.
+	ErrFailedDeleteGroup = "Failed to delete group"
+	// ErrValidationPrefix prefixes validation error messages shown to the user.
+	ErrValidationPrefix = "Validation failed: "
+
+	// RouteNew is the route for rendering the new group form.
+	RouteNew = Path + "/new"
+	// RouteEdit is the route for rendering the edit group form.
+	RouteEdit = Path + "/:id/edit"
+	// RouteUpdate is the route for submitting an update to an existing group.
+	RouteUpdate = Path + "/:id"
+	// RouteDelete is the route for deleting a group.
+	RouteDelete = Path + "/:id/delete"
+)
+
+// Service provides CRUD operations for groups.
+type Service struct {
+	handler.Service
+	cfg       *config.Config
+	db        *gorm.DB
+	validator *validator.Validate
+}
+
+// Handler is the exported instance.
+var Handler = Service{}
+
+// Init registers routes.
+func (s *Service) Init(app *fiber.App, cfg *config.Config, db *gorm.DB, authService *auth.Service) {
+	if app == nil || cfg == nil || db == nil {
+		log.Fatal().Msg(handler.ErrNilACDFatalLogMsg)
+		return
+	}
+
+	s.db = db
+	s.cfg = cfg
+	s.validator = validator.New()
+
+	// Routes
+	app.Get(Path,
+		auth.RequirePermission(authService, auth.PermAdminGroups),
+		s.List,
+	)
+	app.Get(RouteNew,
+		auth.RequirePermission(authService, auth.PermAdminGroups),
+		s.New,
+	)
+	app.Post(Path,
+		auth.RequirePermission(authService, auth.PermAdminGroups),
+		s.Create,
+	)
+	app.Get(RouteEdit,
+		auth.RequirePermission(authService, auth.PermAdminGroups),
+		s.Edit,
+	)
+	app.Post(RouteUpdate,
+		auth.RequirePermission(authService, auth.PermAdminGroups),
+		s.Update,
+	)
+	app.Post(RouteDelete,
+		auth.RequirePermission(authService, auth.PermAdminGroups),
+		s.Delete,
+	)
+}
+
+// List shows groups with simple pagination and search.
+func (s *Service) List(c fiber.Ctx) error {
+	nav := navigation.NewContext(TitleGroups, NavSectionAdmin, NavEntityGroup).
+		AddBreadcrumb(BreadcrumbHomeLbl, dashboard.Path, false).
+		AddBreadcrumb(BreadcrumbAdminLbl, HrefHash, false).
+		AddBreadcrumb(BreadcrumbGroupsLbl, Path, true)
+
+	page := fiber.Query[int](c, QueryPage, 1)
+	if page < 1 {
+		page = 1
+	}
+
+	pageSize := fiber.Query[int](c, QueryPageSize, DefaultPageSize)
+	if pageSize < 1 || pageSize > MaxPageSize {
+		pageSize = DefaultPageSize
+	}
+
+	search := c.Query(QuerySearch, "")
+
+	var (
+		groups     []models.Group
+		totalCount int64
+		tx         = s.db.Model(&models.Group{})
+	)
+
+	if search != "" {
+		like := "%" + search + "%"
+		tx = tx.Where("name ILIKE ? OR external_id ILIKE ? OR description ILIKE ?", like, like, like)
+	}
+
+	if err := tx.Count(&totalCount).Error; err != nil {
+		log.Error().Err(err).Msg("count groups failed")
+
+		return c.Status(fiber.StatusInternalServerError).Render(TemplateList, fiber.Map{
+			"Navigation": nav,
+			"Error":      ErrFailedLoadGroups,
+		}, handler.BaseLayout)
+	}
+
+	totalPages := int((totalCount + int64(pageSize) - 1) / int64(pageSize))
+	if totalPages < 1 {
+		totalPages = 1
+	}
+
+	if page > totalPages {
+		page = totalPages
+	}
+
+	offset := (page - 1) * pageSize
+	if err := tx.Order("id DESC").Limit(pageSize).Offset(offset).Find(&groups).Error; err != nil {
+		log.Error().Err(err).Msg("query groups failed")
+
+		return c.Status(fiber.StatusInternalServerError).Render(TemplateList, fiber.Map{
+			"Navigation": nav,
+			"Error":      ErrFailedLoadGroups,
+		}, handler.BaseLayout)
+	}
+
+	// Load member counts and role mappings for each group
+	memberCounts := make(map[uint]int64)
+	roleMappings := make(map[uint]string) // group_id -> role_name
+
+	for _, g := range groups {
+		var count int64
+		if err := s.db.Model(&models.UserGroup{}).Where("group_id = ?", g.ID).Count(&count).Error; err == nil {
+			memberCounts[g.ID] = count
+		}
+
+		// Load role mapping
+		var mapping models.GroupMapping
+		if err := s.db.Preload("Role").Where("group_id = ?", g.ID).First(&mapping).Error; err == nil {
+			roleMappings[g.ID] = mapping.Role.Name
+		}
+	}
+
+	return c.Render(TemplateList, fiber.Map{
+		"Navigation":   nav,
+		"Groups":       groups,
+		"MemberCounts": memberCounts,
+		"RoleMappings": roleMappings,
+		"Search":       search,
+		"Page":         page,
+		"PageSize":     pageSize,
+		"TotalItems":   totalCount,
+		"TotalPages":   totalPages,
+		"HasPrev":      page > 1,
+		"HasNext":      page < totalPages,
+		"PrevPage":     page - 1,
+		"NextPage":     page + 1,
+	}, handler.BaseLayout)
+}
+
+// New renders empty form.
+func (s *Service) New(c fiber.Ctx) error {
+	nav := navigation.NewContext(TitleNewGroup, NavSectionAdmin, NavEntityGroup).
+		AddBreadcrumb(BreadcrumbHomeLbl, dashboard.Path, false).
+		AddBreadcrumb(BreadcrumbAdminLbl, HrefHash, false).
+		AddBreadcrumb(BreadcrumbGroupsLbl, Path, false).
+		AddBreadcrumb(BreadcrumbNewLbl, RouteNew, true)
+
+	var users []models.User
+	if err := s.db.Order(handler.OrderUsernameASC).Find(&users).Error; err != nil {
+		log.Error().Err(err).Msg("failed to load users")
+
+		return c.Status(fiber.StatusInternalServerError).Render(TemplateForm, fiber.Map{
+			"Navigation": nav,
+			"Error":      "Failed to load users",
+		}, handler.BaseLayout)
+	}
+
+	var roles []models.Role
+	if err := s.db.Order(handler.OrderNameASC).Find(&roles).Error; err != nil {
+		log.Error().Err(err).Msg("failed to load roles")
+
+		return c.Status(fiber.StatusInternalServerError).Render(TemplateForm, fiber.Map{
+			"Navigation": nav,
+			"Error":      "Failed to load roles",
+		}, handler.BaseLayout)
+	}
+
+	var allTags []models.Tag
+	s.db.Order("name asc").Find(&allTags)
+
+	return c.Render(TemplateForm, fiber.Map{
+		"Navigation":  nav,
+		"Group":       models.Group{Source: models.GroupSourceLocal},
+		"IsCreate":    true,
+		"Users":       users,
+		"Roles":       roles,
+		"SelectedIDs": []uint64{},
+		"AllTags":     allTags,
+		"AssignedSet": map[uint]bool{},
+	}, handler.BaseLayout)
+}
+
+// Create handles form submission for creating a group.
+func (s *Service) Create(c fiber.Ctx) error {
+	// Get user IDs from form
+	userIDsBytes := c.Request().PostArgs().PeekMulti("user_ids")
+
+	userIDs := make([]string, len(userIDsBytes))
+	for i, b := range userIDsBytes {
+		userIDs[i] = string(b)
+	}
+
+	var input = formInput{
+		Name:        c.FormValue("name"),
+		ExternalID:  c.FormValue("external_id"),
+		Source:      c.FormValue("source", string(models.GroupSourceLocal)),
+		Description: c.FormValue("description"),
+		RoleID:      0,
+		UserIDs:     userIDs,
+	}
+
+	// Parse role_id from form
+	if roleIDStr := c.FormValue("role_id"); roleIDStr != "" {
+		roleIDParsed, err := strconv.ParseUint(roleIDStr, 10, 32)
+		if err == nil {
+			input.RoleID = uint(roleIDParsed)
+		}
+	}
+
+	if err := s.validator.Struct(input); err != nil {
+		log.Warn().Err(err).Msg("validation failed for create group")
+
+		nav := navigation.NewContext(TitleNewGroup, NavSectionAdmin, NavEntityGroup).
+			AddBreadcrumb(BreadcrumbHomeLbl, dashboard.Path, false).
+			AddBreadcrumb(BreadcrumbAdminLbl, HrefHash, false).
+			AddBreadcrumb(BreadcrumbGroupsLbl, Path, false).
+			AddBreadcrumb(BreadcrumbNewLbl, RouteNew, true)
+
+		return c.Status(fiber.StatusBadRequest).Render(TemplateForm, fiber.Map{
+			"Navigation": nav,
+			"Error":      ErrValidationPrefix + err.Error(),
+			"Group": models.Group{
+				Name:        input.Name,
+				ExternalID:  input.ExternalID,
+				Source:      models.GroupSource(input.Source),
+				Description: input.Description,
+			},
+			"IsCreate": true,
+		}, handler.BaseLayout)
+	}
+
+	g := &models.Group{
+		Name:        input.Name,
+		ExternalID:  input.ExternalID,
+		Source:      models.GroupSource(input.Source),
+		Description: input.Description,
+	}
+
+	// Begin transaction
+	tx := s.db.Begin()
+	if err := tx.Create(g).Error; err != nil {
+		tx.Rollback()
+		log.Error().Err(err).Msg("failed to create group")
+
+		nav := navigation.NewContext(TitleNewGroup, NavSectionAdmin, NavEntityGroup).
+			AddBreadcrumb(BreadcrumbHomeLbl, dashboard.Path, false).
+			AddBreadcrumb(BreadcrumbAdminLbl, HrefHash, false).
+			AddBreadcrumb(BreadcrumbGroupsLbl, Path, false).
+			AddBreadcrumb(BreadcrumbNewLbl, RouteNew, true)
+
+		return c.Status(fiber.StatusInternalServerError).Render(TemplateForm, fiber.Map{
+			"Navigation": nav,
+			"Error":      ErrFailedCreateGroup,
+			"Group":      g,
+			"IsCreate":   true,
+		}, handler.BaseLayout)
+	}
+
+	// Create group mapping to role
+	if input.RoleID > 0 {
+		groupMapping := models.GroupMapping{
+			GroupID: g.ID,
+			RoleID:  input.RoleID,
+		}
+		if err := tx.Create(&groupMapping).Error; err != nil {
+			tx.Rollback()
+			log.Error().Err(err).Msg("failed to create group mapping")
+
+			return handler.RenderError(c, fiber.StatusInternalServerError, "Save Failed", "Failed to assign role to group", nil)
+		}
+	}
+
+	// Create user group memberships. External groups (LDAP/OIDC) get their membership
+	// from directory sync on login, so manual seeding is intentionally skipped.
+	if g.Source == models.GroupSourceLocal {
+		for _, userIDStr := range input.UserIDs {
+			userID, err := strconv.ParseUint(userIDStr, 10, 64)
+			if err != nil {
+				continue // skip invalid IDs
+			}
+
+			userGroup := models.UserGroup{
+				UserID:  userID,
+				GroupID: g.ID,
+			}
+			if err := tx.Create(&userGroup).Error; err != nil {
+				tx.Rollback()
+				log.Error().Err(err).Msg("failed to add user to group")
+
+				return handler.RenderError(c, fiber.StatusInternalServerError, "Save Failed", "Failed to add users to group", nil)
+			}
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		log.Error().Err(err).Msg("failed to commit transaction")
+		return handler.RenderError(c, fiber.StatusInternalServerError, "Save Failed", "Failed to save group", nil)
+	}
+
+	syncGroupTags(s.db, g.ID, parseGroupTagIDs(c))
+
+	return c.Redirect().To(Path)
+}
+
+// Edit renders edit form for a group.
+func (s *Service) Edit(c fiber.Ctx) error {
+	idStr := c.Params("id")
+
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id <= 0 {
+		return c.Status(fiber.StatusBadRequest).SendString(ErrInvalidID)
+	}
+
+	var g models.Group
+	if err = s.db.First(&g, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.Status(fiber.StatusNotFound).SendString(ErrGroupNotFound)
+		}
+
+		log.Error().Err(err).Msg("load group failed")
+
+		return handler.RenderError(c, fiber.StatusInternalServerError, "Database Error", ErrFailedLoadGroup, nil)
+	}
+
+	data, err := s.formContext(&g)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to load group form context")
+		return handler.RenderError(c, fiber.StatusInternalServerError, "Database Error", ErrFailedLoadGroup, nil)
+	}
+
+	data["Navigation"] = editGroupNav(g.ID)
+	data["Group"] = g
+	data["IsCreate"] = false
+	data["IsExternal"] = g.Source != models.GroupSourceLocal
+
+	return c.Render(TemplateForm, data, handler.BaseLayout)
+}
+
+// editGroupNav builds the breadcrumb/navigation context for the edit-group page.
+func editGroupNav(groupID uint) *navigation.Context {
+	return navigation.NewContext(TitleEditGroup, NavSectionAdmin, NavEntityGroup).
+		AddBreadcrumb(BreadcrumbHomeLbl, dashboard.Path, false).
+		AddBreadcrumb(BreadcrumbAdminLbl, HrefHash, false).
+		AddBreadcrumb(BreadcrumbGroupsLbl, Path, false).
+		AddBreadcrumb(BreadcrumbEditLbl, Path+"/"+strconv.FormatUint(uint64(groupID), 10)+"/edit", true)
+}
+
+// formContext loads the shared template data for the group create/edit form:
+// all users and roles, the group's current members, its mapped role, and its tags.
+func (s *Service) formContext(g *models.Group) (fiber.Map, error) {
+	var users []models.User
+	if err := s.db.Order(handler.OrderUsernameASC).Find(&users).Error; err != nil {
+		return nil, fmt.Errorf("load users: %w", err)
+	}
+
+	var roles []models.Role
+	if err := s.db.Order(handler.OrderNameASC).Find(&roles).Error; err != nil {
+		return nil, fmt.Errorf("load roles: %w", err)
+	}
+
+	var userGroups []models.UserGroup
+	if err := s.db.Where("group_id = ?", g.ID).Find(&userGroups).Error; err != nil {
+		return nil, fmt.Errorf("load members: %w", err)
+	}
+
+	selectedIDs := make([]uint64, 0, len(userGroups))
+	for i := range userGroups {
+		selectedIDs = append(selectedIDs, userGroups[i].UserID)
+	}
+
+	var mapping models.GroupMapping
+
+	var mappedRoleID uint
+	if err := s.db.Where("group_id = ?", g.ID).First(&mapping).Error; err == nil {
+		mappedRoleID = mapping.RoleID
+	}
+
+	var allTags []models.Tag
+	s.db.Order("name asc").Find(&allTags)
+
+	var assignedGroupTags []models.GroupTag
+	s.db.Where("group_id = ?", g.ID).Find(&assignedGroupTags)
+
+	tagAssignedSet := make(map[uint]bool, len(assignedGroupTags))
+	for i := range assignedGroupTags {
+		tagAssignedSet[assignedGroupTags[i].TagID] = true
+	}
+
+	return fiber.Map{
+		"Users":        users,
+		"Roles":        roles,
+		"MappedRoleID": mappedRoleID,
+		"SelectedIDs":  selectedIDs,
+		"AllTags":      allTags,
+		"AssignedSet":  tagAssignedSet,
+	}, nil
+}
+
+// Update handles updating an existing group.
+func (s *Service) Update(c fiber.Ctx) error {
+	idStr := c.Params("id")
+
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id <= 0 {
+		return c.Status(fiber.StatusBadRequest).SendString(ErrInvalidID)
+	}
+
+	var g models.Group
+	if err = s.db.First(&g, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.Status(fiber.StatusNotFound).SendString(ErrGroupNotFound)
+		}
+
+		log.Error().Err(err).Msg("load group failed")
+
+		return handler.RenderError(c, fiber.StatusInternalServerError, "Database Error", ErrFailedLoadGroup, nil)
+	}
+
+	// External groups (LDAP/OIDC) are synchronized from the directory. Capture the
+	// stored state up front: their identity fields (source, external id) form the sync
+	// key and must not be edited once external, and their membership is owned by
+	// SyncUserGroups. This is derived from the stored source so it survives a disabled
+	// (unsubmitted) source field on validation-error rerenders.
+	wasExternal := g.Source != models.GroupSourceLocal
+
+	// Get user IDs from the form
+	userIDsBytes := c.Request().PostArgs().PeekMulti("user_ids")
+
+	userIDs := make([]string, len(userIDsBytes))
+	for i, b := range userIDsBytes {
+		userIDs[i] = string(b)
+	}
+
+	var input = formInput{
+		Name:        c.FormValue("name"),
+		ExternalID:  c.FormValue("external_id"),
+		Source:      c.FormValue("source", string(models.GroupSourceLocal)),
+		Description: c.FormValue("description"),
+		RoleID:      0,
+		UserIDs:     userIDs,
+	}
+
+	// Parse role_id from form
+	if roleIDStr := c.FormValue("role_id"); roleIDStr != "" {
+		roleIDParsed, errParse := strconv.ParseUint(roleIDStr, 10, 32)
+		if errParse == nil {
+			input.RoleID = uint(roleIDParsed)
+		}
+	}
+
+	if errValidator := s.validator.Struct(input); errValidator != nil {
+		log.Warn().Err(errValidator).Msg("validation failed for update group")
+
+		// Reflect submitted values for editable fields, but preserve the stored
+		// identity for external groups so the rerender keeps its read-only state
+		// (the disabled source field is not submitted).
+		g.Name = input.Name
+		g.Description = input.Description
+
+		if !wasExternal {
+			g.Source = models.GroupSource(input.Source)
+			g.ExternalID = input.ExternalID
+		}
+
+		data, ctxErr := s.formContext(&g)
+		if ctxErr != nil {
+			log.Error().Err(ctxErr).Msg("failed to load group form context")
+			return handler.RenderError(c, fiber.StatusInternalServerError, "Database Error", ErrFailedLoadGroup, nil)
+		}
+
+		data["Navigation"] = editGroupNav(g.ID)
+		data["Error"] = ErrValidationPrefix + errValidator.Error()
+		data["Group"] = g
+		data["IsCreate"] = false
+		// The lock reflects the stored state, so an in-progress local→external
+		// conversion stays editable (the user may still need to set the external id).
+		data["IsExternal"] = wasExternal
+
+		return c.Status(fiber.StatusBadRequest).Render(TemplateForm, data, handler.BaseLayout)
+	}
+
+	g.Name = input.Name
+	g.Description = input.Description
+
+	// Only a currently-local group may change its source / external id. An already
+	// external group keeps its stored identity regardless of what the form submitted.
+	if !wasExternal {
+		g.Source = models.GroupSource(input.Source)
+		g.ExternalID = input.ExternalID
+	}
+
+	// Decide membership handling from the final source, not the stored one, so that
+	// converting a local group to LDAP/OIDC does not write phantom memberships.
+	isExternal := g.Source != models.GroupSourceLocal
+
+	// Begin transaction
+	tx := s.db.Begin()
+
+	if errSave := tx.Save(&g).Error; errSave != nil {
+		tx.Rollback()
+		log.Error().Err(errSave).Msg("failed to update group")
+
+		return c.Status(fiber.StatusInternalServerError).Render(TemplateForm, fiber.Map{
+			"Navigation": editGroupNav(g.ID),
+			"Error":      ErrFailedUpdateGroup,
+			"Group":      g,
+			"IsCreate":   false,
+			"IsExternal": wasExternal,
+		}, handler.BaseLayout)
+	}
+
+	// Update or create group mapping; RoleID == 0 means remove any existing mapping.
+	if errMapping := s.reconcileGroupMapping(c, tx, g.ID, input.RoleID); errMapping != nil {
+		return errMapping
+	}
+
+	if errGMS := s.reconcileMembershipForUpdate(c, tx, g.ID, wasExternal, isExternal, &input); errGMS != nil {
+		return errGMS
+	}
+
+	if err = tx.Commit().Error; err != nil {
+		log.Error().Err(err).Msg("failed to commit transaction")
+		return handler.RenderError(c, fiber.StatusInternalServerError, "Save Failed", "Failed to update group", nil)
+	}
+
+	syncGroupTags(s.db, g.ID, parseGroupTagIDs(c))
+
+	return c.Redirect().To(Path)
+}
+
+// Delete removes a group.
+func (s *Service) Delete(c fiber.Ctx) error {
+	idStr := c.Params("id")
+
+	id, err := strconv.Atoi(idStr)
+	if err != nil || id <= 0 {
+		return c.Status(fiber.StatusBadRequest).SendString(ErrInvalidID)
+	}
+
+	if err := s.db.Delete(&models.Group{}, id).Error; err != nil {
+		log.Error().Err(err).Msg("failed to delete group")
+		return handler.RenderError(c, fiber.StatusInternalServerError, "Delete Failed", ErrFailedDeleteGroup, nil)
+	}
+
+	return c.Redirect().To(Path)
+}

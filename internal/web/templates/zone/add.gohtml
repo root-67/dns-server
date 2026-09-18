@@ -1,0 +1,190 @@
+<!--begin::App Wrapper-->
+<div class="app-wrapper">
+    {{ template "partials/header-navigation" .}}
+    {{ template "partials/sidebar-navigation" .}}
+    <!--begin::App Main-->
+    <main class="app-main">
+        <!--begin::App Content Header-->
+        <div class="app-content-header">
+            <!--begin::Container-->
+            <div class="container-fluid">
+                <!--begin::Row-->
+                <div class="row">
+                    <div class="col-sm-6"><h3 class="mb-0">{{.Navigation.PageTitle}}</h3></div>
+                    <div class="col-sm-6">
+                        <ol class="breadcrumb float-sm-end">
+                            {{range .Navigation.Breadcrumbs}}
+                            {{if .Active}}
+                            <li class="breadcrumb-item active" aria-current="page">{{.Title}}</li>
+                            {{else}}
+                            <li class="breadcrumb-item"><a href="{{.URL}}">{{.Title}}</a></li>
+                            {{end}}
+                            {{end}}
+                        </ol>
+                    </div>
+                </div>
+                <!--end::Row-->
+            </div>
+            <!--end::Container-->
+        </div>
+        <!--end::App Content Header-->
+        <!--begin::App Content-->
+        <div class="app-content">
+            <!--begin::Container-->
+            <div class="container-fluid">
+                {{if .Success}}
+                <div class="alert alert-success alert-dismissible fade show" role="alert">
+                    {{.Success}}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+                {{end}}
+                {{if .ConflictZone}}
+                <div class="alert alert-warning alert-dismissible fade show" role="alert">
+                    <strong>Zone already exists.</strong>
+                    <code>{{.ConflictZone}}</code> is already configured in PowerDNS.
+                    <a href="/zone/edit/{{.ConflictZone}}" class="alert-link ms-1">Edit the existing zone &rarr;</a>
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+                {{end}}
+                {{if .Error}}
+                <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                    {{if eq (printf "%T" .Error) "[]string"}}
+                        {{range .Error}}
+                        <div>{{.}}</div>
+                        {{end}}
+                    {{else}}
+                        {{.Error}}
+                    {{end}}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+                {{end}}
+                <!--begin::Row-->
+                <div class="row">
+                    <div class="col-12">
+                        <div class="card card-primary card-outline mb-4">
+                            <div class="card-header">
+                                <h3 class="card-title">Zone Details</h3>
+                            </div>
+                            <!--begin::Form-->
+                            <form method="POST" action="/zone/add">
+                                <input type="hidden" id="zone-type-input" name="zone_type" value="{{if .Form.ZoneType}}{{.Form.ZoneType}}{{else}}forward{{end}}">
+                                <div class="card-body">
+                                    <!-- Zone Category Tabs -->
+                                    <div class="mb-3">
+                                        <label class="form-label">Zone Category <span class="text-danger">*</span></label>
+                                        <div class="btn-group w-100" role="group" aria-label="Zone category">
+                                            <input type="radio" class="btn-check" name="zone-category-radio" id="cat-forward" autocomplete="off" {{if or (not .Form.ZoneType) (eq .Form.ZoneType "forward")}}checked{{end}}>
+                                            <label class="btn btn-outline-primary" for="cat-forward"><i class="bi bi-globe me-1"></i>Forward</label>
+
+                                            <input type="radio" class="btn-check" name="zone-category-radio" id="cat-reverse-ipv4" autocomplete="off" {{if eq .Form.ZoneType "reverse-ipv4"}}checked{{end}}>
+                                            <label class="btn btn-outline-primary" for="cat-reverse-ipv4"><i class="bi bi-arrow-left-right me-1"></i>Reverse IPv4</label>
+
+                                            <input type="radio" class="btn-check" name="zone-category-radio" id="cat-reverse-ipv6" autocomplete="off" {{if eq .Form.ZoneType "reverse-ipv6"}}checked{{end}}>
+                                            <label class="btn btn-outline-primary" for="cat-reverse-ipv6"><i class="bi bi-arrow-left-right me-1"></i>Reverse IPv6</label>
+                                        </div>
+                                    </div>
+
+                                    <!-- Forward: Zone Name -->
+                                    <div class="mb-3" id="forward-name-group">
+                                        <label for="zone-name" class="form-label">Zone Name <span class="text-danger">*</span></label>
+                                        <input type="text"
+                                               class="form-control"
+                                               id="zone-name"
+                                               name="name"
+                                               placeholder="example.com"
+                                               value="{{.Form.Name}}">
+                                        <div class="form-text">FQDN for the zone. A trailing dot will be added automatically.</div>
+                                    </div>
+
+                                    <!-- Reverse: Network Prefix -->
+                                    <div class="mb-3" id="reverse-network-group" style="display:none">
+                                        <label for="reverse-network" class="form-label">Network Prefix <span class="text-danger">*</span></label>
+                                        <input type="text"
+                                               class="form-control"
+                                               id="reverse-network"
+                                               name="reverse_network"
+                                               placeholder=""
+                                               value="{{.Form.ReverseNetwork}}">
+                                        <div class="form-text" id="reverse-network-help"></div>
+                                        <div class="mt-2" id="computed-zone-preview" style="display:none">
+                                            Zone name: <code id="computed-zone-name"></code>
+                                        </div>
+                                    </div>
+
+                                    <!-- Zone Type/Kind -->
+                                    <div class="mb-3">
+                                        <label for="zone-kind" class="form-label">Zone Type <span class="text-danger">*</span></label>
+                                        <select class="form-select" id="zone-kind" name="kind" required>
+                                            <option value="">Select zone type...</option>
+                                            <option value="Native" {{if eq .Form.Kind "Native"}}selected{{end}}>Native</option>
+                                            <option value="Master" {{if eq .Form.Kind "Master"}}selected{{end}}>Primary (Master)</option>
+                                            <option value="Slave" {{if eq .Form.Kind "Slave"}}selected{{end}}>Secondary (Slave)</option>
+                                        </select>
+                                        <div id="zone-kind-help" class="form-text">
+                                            <strong>Native:</strong> Standard zone type for standalone servers.<br>
+                                            <strong>Primary (Master):</strong> Zone that can be transferred to secondary servers.<br>
+                                            <strong>Secondary (Slave):</strong> Zone that receives data from a primary server.
+                                        </div>
+                                    </div>
+
+                                    <!-- Masters (for Slave zones) -->
+                                    <div class="mb-3" id="masters-group" style="display: none;">
+                                        <label for="zone-masters" class="form-label">Primary Servers (Masters)</label>
+                                        <input type="text"
+                                               class="form-control"
+                                               id="zone-masters"
+                                               name="masters"
+                                               aria-describedby="zone-masters-help"
+                                               placeholder="192.0.2.1, 192.0.2.2"
+                                               value="{{.Form.Masters}}">
+                                        <div id="zone-masters-help" class="form-text">
+                                            Enter comma-separated IP addresses of the primary servers to transfer from.
+                                        </div>
+                                    </div>
+
+                                    <!-- SOA-EDIT-API -->
+                                    <div class="mb-3">
+                                        <label for="soa-edit-api" class="form-label">SOA-EDIT-API <span class="text-danger">*</span></label>
+                                        <select class="form-select" id="soa-edit-api" name="soa_edit_api" required
+                                                onchange="document.getElementById('soa-edit-api-off-warn').style.display = this.value === 'OFF' ? '' : 'none'">
+                                            <option value="DEFAULT" {{if eq .Form.SOAEditAPI "DEFAULT"}}selected{{end}}>DEFAULT</option>
+                                            <option value="INCREASE" {{if eq .Form.SOAEditAPI "INCREASE"}}selected{{end}}>INCREASE</option>
+                                            <option value="EPOCH" {{if eq .Form.SOAEditAPI "EPOCH"}}selected{{end}}>EPOCH</option>
+                                            <option value="OFF" {{if eq .Form.SOAEditAPI "OFF"}}selected{{end}}>OFF</option>
+                                        </select>
+                                        <div id="soa-edit-api-help" class="form-text">
+                                            <strong>DEFAULT:</strong> Use the server's default SOA-EDIT-API setting.<br>
+                                            <strong>INCREASE:</strong> Increment the serial number on each change.<br>
+                                            <strong>EPOCH:</strong> Set serial to current Unix timestamp.<br>
+                                            <strong>OFF:</strong> Do not automatically update the SOA serial.
+                                        </div>
+                                        <div id="soa-edit-api-off-warn" class="callout callout-warning mt-2 small"
+                                             style="{{ if ne .Form.SOAEditAPI "OFF" }}display:none{{ end }}">
+                                            <i class="bi bi-exclamation-triangle me-1"></i>
+                                            <strong>OFF</strong> disables automatic serial updates via the API.
+                                            Secondary servers may not detect zone changes and fail to sync.
+                                            Only use this if serial management is handled at the server level via <code>default-soa-edit</code>.
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="card-footer">
+                                    <button type="submit" class="btn btn-primary">Add Zone</button>
+                                    <a href="/dashboard" class="btn btn-secondary">Cancel</a>
+                                </div>
+                            </form>
+                            <!--end::Form-->
+                        </div>
+                    </div>
+                </div>
+                <!--end::Row-->
+            </div>
+            <!--end::Container-->
+        </div>
+        <!--end::App Content-->
+    </main>
+    <!--end::App Main-->
+    {{ template "partials/footer" .}}
+</div>
+<!--end::App Wrapper-->
+
+<script src="/static/js/zone-add.js"></script>

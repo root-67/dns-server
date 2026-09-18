@@ -1,0 +1,818 @@
+package zoneedit
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html/template"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/go-playground/validator/v10"
+	"github.com/gofiber/fiber/v3"
+	pdnsapi "github.com/joeig/go-powerdns/v3"
+	"github.com/rs/zerolog/log"
+	"gorm.io/gorm"
+
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/activitylog"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/auth"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/config"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/db/models"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/powerdns"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/web/handler"
+	ttlsettings "github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/web/handler/admin/settings/ttl"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/web/handler/dashboard"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/web/navigation"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/web/session"
+)
+
+// uriRecordRe matches the RFC 7553 content format for URI records:
+// priority weight "target"  OR  priority weight target
+// It captures:
+//
+//	1: priority (digits)
+//	2: weight (digits)
+//	3: target if quoted (inner content without quotes)
+//	4: target if unquoted (rest of the line)
+var uriRecordRe = regexp.MustCompile(`^\s*(\d+)\s+(\d+)\s+(?:"((?:[^"\\]|\\.)*)"|(.*))\s*$`)
+
+const (
+	// Path is the path to the edit zone page.
+	Path = handler.RootPath + "zone/edit/:name"
+
+	// TemplateName is the name of the edit zone template.
+	TemplateName = "zone/edit"
+
+	// PageTitle is the title of the edit zone page.
+	PageTitle = "Edit Zone"
+
+	// ErrMsgZoneNameRequired is the error message when zone name is missing.
+	ErrMsgZoneNameRequired = "Zone name is required"
+
+	// DefaultRecordsPageSize is the default number of records per page on the zone edit page.
+	DefaultRecordsPageSize = 25
+
+	defaultTimeout = 30 * time.Second
+)
+
+// SOAEditAPI represents the SOA-EDIT-API setting.
+type SOAEditAPI string
+
+const (
+	// SOAEditAPIDefault uses the default SOA-EDIT-API setting.
+	SOAEditAPIDefault SOAEditAPI = "DEFAULT"
+
+	// SOAEditAPIIncrease increments the serial number.
+	SOAEditAPIIncrease SOAEditAPI = "INCREASE"
+
+	// SOAEditAPIEpoch sets the serial to the current epoch timestamp.
+	SOAEditAPIEpoch SOAEditAPI = "EPOCH"
+
+	// SOAEditAPIOff disables SOA-EDIT-API.
+	SOAEditAPIOff SOAEditAPI = "OFF"
+)
+
+// ZoneForm represents the form data for editing a zone.
+type ZoneForm struct {
+	Name       string     `form:"name"`
+	Kind       string     `form:"kind"         validate:"required,oneof=Native Master Slave"`
+	SOAEditAPI SOAEditAPI `form:"soa_edit_api" validate:"required,oneof=DEFAULT INCREASE EPOCH OFF"`
+	Masters    string     `form:"masters"`  // Comma-separated list for Slave zones
+	AutoPTR    bool       `form:"auto_ptr"` // Automatically create PTR records for A/AAAA changes
+}
+
+// RecordData represents a single DNS record for display.
+type RecordData struct {
+	Name        string `json:"name"`         // Full canonical name
+	DisplayName string `json:"display_name"` // Shortened name for display (without zone)
+	Type        string `json:"type"`
+	TTL         uint32 `json:"ttl"`
+	Content     string `json:"content"`
+	Disabled    bool   `json:"disabled"`
+	Comment     string `json:"comment"` // Record comment
+}
+
+// RecordChange represents a change to be applied to records.
+type RecordChange struct {
+	Existed bool     `json:"existed"` // Whether the record existed before
+	Changed bool     `json:"changed"` // Whether this RRset has actually changed
+	Name    string   `json:"name"`
+	Type    string   `json:"type"`
+	TTL     uint32   `json:"ttl"`
+	Records []Record `json:"records"`
+	Comment string   `json:"comment"` // Comment for the RRset
+}
+
+// Record represents a single record entry.
+type Record struct {
+	Content  string `json:"content"`
+	Disabled bool   `json:"disabled"`
+}
+
+// RecordsUpdateRequest represents the request for updating records.
+type RecordsUpdateRequest struct {
+	Changes []RecordChange `json:"changes"`
+}
+
+// RecordTypeOption represents a record type option for the dropdown.
+type RecordTypeOption struct {
+	Type        string `json:"type"`
+	Description string `json:"description"`
+	Enabled     bool   `json:"enabled"`
+	Help        string `json:"help"`
+}
+
+// Service is the edit zone handler service.
+type Service struct {
+	handler.Service
+	cfg         *config.Config
+	db          *gorm.DB
+	validator   *validator.Validate
+	authService *auth.Service
+}
+
+// Handler is the edit zone handler.
+var Handler = Service{}
+
+// Init initializes the edit zone handler.
+func (s *Service) Init(app *fiber.App, cfg *config.Config, db *gorm.DB, authService *auth.Service) {
+	if app == nil || cfg == nil || db == nil {
+		log.Fatal().Msg(handler.ErrNilACDFatalLogMsg)
+		return
+	}
+
+	s.db = db
+	s.cfg = cfg
+	s.validator = validator.New()
+	s.authService = authService
+
+	// register routes with permission checks
+	app.Get(Path,
+		auth.RequirePermission(authService, auth.PermZoneUpdate),
+		s.Get,
+	)
+	app.Post(Path,
+		auth.RequirePermission(authService, auth.PermZoneUpdate),
+		s.Post,
+	)
+	app.Post(Path+"/records",
+		auth.RequirePermission(authService, auth.PermZoneUpdate),
+		s.PostRecords,
+	)
+	app.Post(Path+"/delete",
+		auth.RequirePermission(authService, auth.PermZoneDelete),
+		s.Delete,
+	)
+}
+
+// Get handles the edit zone page rendering.
+func (s *Service) Get(c fiber.Ctx) error {
+	zoneName := c.Params("name")
+	if zoneName == "" {
+		return c.Status(fiber.StatusBadRequest).SendString(ErrMsgZoneNameRequired)
+	}
+
+	zoneName = normalizeZoneName(zoneName)
+
+	if !s.canAccessZone(c, zoneName) {
+		return c.Status(fiber.StatusForbidden).SendString("Access to this zone is not permitted")
+	}
+
+	// Create navigation context
+	nav := navigation.NewContext(PageTitle, "zones", "edit").
+		AddBreadcrumb("Dashboard", dashboard.Path, false).
+		AddBreadcrumb(PageTitle, "", true)
+
+	// Ensure PDNS client is available and fetch zone
+	zone, err := s.getZoneOrRender(c, nav, zoneName)
+	if err != nil {
+		return err
+	}
+	// If an error response was already rendered inside getZoneOrRender,
+	// it returns a nil zone with no error. Stop processing in that case.
+	if zone == nil {
+		return nil
+	}
+
+	// Extract SOA-EDIT-API and masters
+	soaEditAPI := getSOAEditAPIFromZone(zone)
+	masters := strings.Join(zone.Masters, ", ")
+
+	// Load per-zone application settings.
+	zoneSettings := loadZoneSettings(s.db, zoneName)
+
+	// Collect reverse and forward zone names for cross-zone hints and the
+	// Auto-PTR checkbox warning. A single zone list call serves both purposes.
+	listCtx, listCancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer listCancel()
+
+	reverseZoneNames, forwardZoneNames := buildZoneLists(listCtx)
+
+	// Populate form with zone data
+	form := &ZoneForm{
+		Name:       *zone.Name,
+		Kind:       string(*zone.Kind),
+		SOAEditAPI: soaEditAPI,
+		Masters:    masters,
+		AutoPTR:    zoneSettings.AutoPTR,
+	}
+
+	// Extract records from RRsets
+	records := extractRecordsFromRRSets(zone.RRsets, zoneName, getDisplayNameForZone)
+
+	// Check DNSSEC status
+	dnssecEnabled := zone.DNSsec != nil && *zone.DNSsec
+
+	// Load allowed record types from settings
+	allowedRecordTypes := s.loadAllowedRecordTypes(zoneIsReverse(*zone.Name))
+
+	// Sort record types alphabetically by type
+	sort.Slice(allowedRecordTypes, func(i, j int) bool {
+		return allowedRecordTypes[i].Type < allowedRecordTypes[j].Type
+	})
+
+	// Resolve records page size preference.
+	currentUser, hasUser := c.Locals("CurrentUser").(models.User)
+	recordsPageSize := DefaultRecordsPageSize
+
+	if hasUser && currentUser.ID != 0 {
+		var u models.User
+		if s.db.Select("zone_edit_page_size").First(&u, currentUser.ID).Error == nil && u.ZoneEditPageSize > 0 {
+			recordsPageSize = u.ZoneEditPageSize
+		}
+	}
+
+	if hasUser && currentUser.ID != 0 && c.Query("pageSize") != "" {
+		if ps := fiber.Query[int](c, "pageSize", 0); ps >= 1 && ps <= 100 {
+			recordsPageSize = ps
+			s.db.Model(&models.User{}).Where("id = ?", currentUser.ID).Update("zone_edit_page_size", ps)
+		}
+	}
+
+	// Load TTL presets for the record edit modal.
+	ttlPresets := ttlsettings.LoadWithDefaults(s.db)
+
+	// Serialize initialization data for Alpine component.
+	// json.Marshal escapes </>, & by default — safe to embed in a <script> tag.
+	// Build a map of PTR name → reverse zone name for A/AAAA records that
+	// already have a matching PTR record, so the UI can show a hint badge.
+	existingPTRs := buildExistingPTRsMap(listCtx, records, reverseZoneNames)
+
+	initJSON, err := json.Marshal(map[string]interface{}{
+		"zoneName":     *zone.Name,
+		"records":      records,
+		"allowedTypes": allowedRecordTypes,
+		"pageSize":     recordsPageSize,
+		"ttlPresets":   ttlPresets,
+		"reverseZones": reverseZoneNames,
+		"forwardZones": forwardZoneNames,
+		"existingPTRs": existingPTRs,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("failed to marshal zone init data")
+
+		initJSON = []byte(`{"zoneName":"","records":[],"allowedTypes":[],"pageSize":25}`)
+	}
+
+	// Render form with existing zone data
+	return c.Render(TemplateName, fiber.Map{
+		"Navigation":         nav,
+		"Form":               form,
+		"Zone":               zone,
+		"Records":            records,
+		"DNSSECEnabled":      dnssecEnabled,
+		"AllowedRecordTypes": allowedRecordTypes,
+		"RecordsPageSize":    recordsPageSize,
+		"InitDataJSON":       template.JS(initJSON), //nolint:gosec // safe: json.Marshal escapes HTML chars
+		"Success":            c.Query("success"),
+		"IsReverse":          zoneIsReverse(zoneName),
+		"ReverseZoneNames":   reverseZoneNames,
+	}, handler.BaseLayout)
+}
+
+// Post handles the edit zone form submission.
+func (s *Service) Post(c fiber.Ctx) error {
+	zoneName := c.Params("name")
+	if zoneName == "" {
+		return c.Status(fiber.StatusBadRequest).SendString(ErrMsgZoneNameRequired)
+	}
+
+	// Ensure the zone name ends with a dot
+	if !strings.HasSuffix(zoneName, ".") {
+		zoneName += "."
+	}
+
+	if !s.canAccessZone(c, zoneName) {
+		return c.Status(fiber.StatusForbidden).SendString("Access to this zone is not permitted")
+	}
+
+	// Create navigation context
+	nav := navigation.NewContext(PageTitle, "zones", "edit").
+		AddBreadcrumb("Dashboard", dashboard.Path, false).
+		AddBreadcrumb(PageTitle, "", true)
+
+	// Parse form data
+	form := &ZoneForm{}
+	if err := c.Bind().Body(form); err != nil {
+		log.Error().Err(err).Msg("failed to parse edit zone form")
+
+		return c.Status(fiber.StatusBadRequest).Render(TemplateName, fiber.Map{
+			"Navigation": nav,
+			"Form":       form,
+			"Error":      "Invalid form data",
+		}, handler.BaseLayout)
+	}
+
+	// Validate form
+	if err := s.validator.Struct(form); err != nil {
+		var validationErrors validator.ValidationErrors
+		errors.As(err, &validationErrors)
+
+		errorMessages := make([]string, len(validationErrors))
+		for i, ve := range validationErrors {
+			errorMessages[i] = "Field '" + ve.Field() + "' failed validation tag '" + ve.Tag() + "'"
+		}
+
+		log.Error().Err(err).Msg("validation failed for edit zone")
+
+		return c.Status(fiber.StatusBadRequest).Render(TemplateName, fiber.Map{
+			"Navigation": nav,
+			"Form":       form,
+			"Error":      errorMessages,
+		}, handler.BaseLayout)
+	}
+
+	// Check if the PowerDNS client is initialized
+	if powerdns.Engine.Client == nil {
+		log.Error().Msg(powerdns.ErrMsgClientNotInitialized)
+
+		return c.Status(fiber.StatusInternalServerError).Render(TemplateName, fiber.Map{
+			"Navigation": nav,
+			"Form":       form,
+			"Error":      powerdns.ErrMsgClientNotInitializedDetailed,
+		}, handler.BaseLayout)
+	}
+
+	// Update zone via PowerDNS API
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
+	// Fetch the current zone state before the update so we can compute a diff.
+	currentZone, err := powerdns.Engine.Zones.Get(ctx, zoneName)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).Render(TemplateName, fiber.Map{
+			"Navigation": nav,
+			"Form":       form,
+			"Error":      "Failed to fetch zone: " + err.Error(),
+		}, handler.BaseLayout)
+	}
+
+	// Prepare zone update
+	soaEditAPIStr := string(form.SOAEditAPI)
+	kind := pdnsapi.ZoneKind(form.Kind)
+	zoneUpdate := pdnsapi.Zone{
+		SOAEditAPI: &soaEditAPIStr,
+		Kind:       &kind,
+	}
+
+	// Add masters if a zone type is Slave
+	if form.Kind == "Slave" {
+		masters, mastersErr := parseMasters(form.Masters)
+		if mastersErr != nil {
+			return c.Status(fiber.StatusBadRequest).Render(TemplateName, fiber.Map{
+				"Navigation": nav,
+				"Form":       form,
+				"Error":      mastersErr.Error(),
+			}, handler.BaseLayout)
+		}
+
+		zoneUpdate.Masters = masters
+	}
+
+	err = powerdns.Engine.Zones.Change(ctx, zoneName, &zoneUpdate)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("zone_name", zoneName).
+			Msg("failed to update zone")
+
+		return c.Status(fiber.StatusInternalServerError).Render(TemplateName, fiber.Map{
+			"Navigation": nav,
+			"Form":       form,
+			"Error":      "Failed to update zone: " + err.Error(),
+		}, handler.BaseLayout)
+	}
+
+	log.Info().
+		Str("zone_name", zoneName).
+		Str("zone_kind", form.Kind).
+		Str("soa_edit_api", string(form.SOAEditAPI)).
+		Msg("Zone updated successfully")
+
+	// Load old per-zone settings before overwriting (needed for diff).
+	oldZoneSettings := loadZoneSettings(s.db, zoneName)
+
+	// Auto-PTR is meaningless on reverse zones — strip it server-side regardless
+	// of what was submitted.
+	autoPTR := form.AutoPTR && !zoneIsReverse(zoneName) && form.Kind != "Slave"
+
+	// Persist per-zone application settings.
+	if saveErr := saveZoneSettings(s.db, zoneName, ZoneSettings{AutoPTR: autoPTR}); saveErr != nil {
+		log.Warn().Err(saveErr).Str("zone_name", zoneName).Msg("failed to save zone settings")
+	}
+
+	form.AutoPTR = autoPTR // keep form consistent for diff
+
+	// Record activity: zone updated (include before/after diff)
+	userID, username := currentUserFromSession(c)
+	activitylog.Record(
+		&activitylog.Entry{
+			DB:           s.db,
+			UserID:       userID,
+			Username:     username,
+			Action:       activitylog.ActionZoneUpdated,
+			ResourceType: activitylog.ResourceTypeZone, ResourceName: zoneName,
+			Details:   buildZoneSettingsDiff(currentZone, form, oldZoneSettings),
+			IPAddress: c.IP(),
+		},
+	)
+
+	// Redirect back to the zone edit page with success message
+	return c.Redirect().To("/zone/edit/" + zoneName + "?success=Zone updated successfully")
+}
+
+// PostRecords handles the record updates for a zone.
+func (s *Service) PostRecords(c fiber.Ctx) error {
+	zoneName := c.Params("name")
+	if zoneName == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"message": ErrMsgZoneNameRequired,
+		})
+	}
+
+	// Ensure the zone name ends with a dot
+	if !strings.HasSuffix(zoneName, ".") {
+		zoneName += "."
+	}
+
+	if !s.canAccessZone(c, zoneName) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"success": false,
+			"message": "Access to this zone is not permitted",
+		})
+	}
+
+	// Parse JSON request
+	var request RecordsUpdateRequest
+	if err := c.Bind().Body(&request); err != nil {
+		log.Error().Err(err).Msg("failed to parse records update request")
+
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"message": "Invalid request data",
+		})
+	}
+
+	// ensure only allowed record types are being modified
+	if errValidateRecordTypes := s.validateRecordsUpdateAreValidTypes(
+		c,
+		zoneName,
+		&request,
+		zoneIsReverse(zoneName)); errValidateRecordTypes != nil {
+		return errValidateRecordTypes
+	}
+
+	// Check if the PowerDNS client is initialized
+	if powerdns.Engine.Client == nil {
+		log.Error().Msg(powerdns.ErrMsgClientNotInitialized)
+
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"message": powerdns.ErrMsgClientNotInitialized,
+		})
+	}
+
+	// Build RRsets for PowerDNS API
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
+	// Fetch the current zone state before patching so we can diff old vs. new.
+	currentZone, err := powerdns.Engine.Zones.Get(ctx, zoneName)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"message": fmt.Sprintf("failed to fetch zone: %v", err),
+		})
+	}
+
+	rrSets := buildRRSetsFromChanges(request.Changes)
+
+	// Update records via PowerDNS API
+	err = powerdns.Engine.Records.Patch(ctx, zoneName, &pdnsapi.RRsets{
+		Sets: rrSets,
+	})
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("zone_name", zoneName).
+			Msg("failed to update zone records")
+
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"message": "Failed to update records: " + err.Error(),
+		})
+	}
+
+	log.Info().
+		Str("zone_name", zoneName).
+		Int("changes_count", len(request.Changes)).
+		Msg("Zone records updated successfully")
+
+	userID, username := currentUserFromSession(c)
+
+	// Auto-create PTR records if enabled for this zone (forward zones only).
+	var ptrNoReverseZone []string
+
+	if !zoneIsReverse(zoneName) {
+		if zs := loadZoneSettings(s.db, zoneName); zs.AutoPTR {
+			ptrNoReverseZone = s.applyAutoPTR(ctx, currentZone, request.Changes, userID, username, c.IP())
+		}
+	}
+
+	// Record activity: record changed (include per-RRset before/after diff)
+	activitylog.Record(
+		&activitylog.Entry{
+			DB:           s.db,
+			UserID:       userID,
+			Username:     username,
+			Action:       activitylog.ActionRecordChanged,
+			ResourceType: activitylog.ResourceTypeZone,
+			ResourceName: zoneName,
+			Details:      buildRecordsDiff(currentZone, request.Changes),
+			IPAddress:    c.IP(),
+		},
+	)
+
+	return c.JSON(fiber.Map{
+		"success":               true,
+		"message":               "Records updated successfully",
+		"ptr_no_reverse_zone":   ptrNoReverseZone,
+	})
+}
+
+// Delete handles the zone deletion.
+func (s *Service) Delete(c fiber.Ctx) error {
+	zoneName := c.Params("name")
+	if zoneName == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"message": ErrMsgZoneNameRequired,
+		})
+	}
+
+	// Ensure zone name ends with a dot
+	if !strings.HasSuffix(zoneName, ".") {
+		zoneName += "."
+	}
+
+	if !s.canAccessZone(c, zoneName) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"success": false,
+			"message": "Access to this zone is not permitted",
+		})
+	}
+
+	// Check if PowerDNS client is initialized
+	if powerdns.Engine.Client == nil {
+		log.Error().Msg(powerdns.ErrMsgClientNotInitialized)
+
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"message": powerdns.ErrMsgClientNotInitialized,
+		})
+	}
+
+	// Fetch zone snapshot before deletion for potential undo.
+	var snapshot *activitylog.ZoneSnapshot
+
+	snapCtx, snapCancel := context.WithTimeout(context.Background(), defaultTimeout)
+	zone, snapErr := powerdns.Engine.Zones.Get(snapCtx, zoneName)
+
+	snapCancel()
+
+	if snapErr == nil && zone != nil {
+		snapshot = buildZoneSnapshot(zone)
+	}
+
+	// Delete zone via PowerDNS API
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
+	err := powerdns.Engine.Zones.Delete(ctx, zoneName)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("zone_name", zoneName).
+			Msg("failed to delete zone")
+
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"message": "Failed to delete zone: " + err.Error(),
+		})
+	}
+
+	log.Info().
+		Str("zone_name", zoneName).
+		Msg("Zone deleted successfully")
+
+	// Record activity: zone deleted (include snapshot for potential undo)
+	userID, username := currentUserFromSession(c)
+	activitylog.Record(
+		&activitylog.Entry{
+			DB:           s.db,
+			UserID:       userID,
+			Username:     username,
+			Action:       activitylog.ActionZoneDeleted,
+			ResourceType: activitylog.ResourceTypeZone,
+			ResourceName: zoneName,
+			Details:      snapshot,
+			IPAddress:    c.IP(),
+		},
+	)
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "Zone deleted successfully",
+	})
+}
+
+// buildRRSetsFromChanges converts RecordChange entries into PowerDNS RRset patch operations,
+// skipping unchanged entries unless they represent a deletion.
+func buildRRSetsFromChanges(changes []RecordChange) []pdnsapi.RRset {
+	rrSets := make([]pdnsapi.RRset, 0, len(changes))
+
+	for _, change := range changes {
+		// Always process a deletion of an existing RRset (existed=true, no records),
+		// even if the frontend forgot to set changed=true (defensive).
+		isDeletion := change.Existed && len(change.Records) == 0
+		if !change.Changed && !isDeletion {
+			continue
+		}
+
+		records := make([]pdnsapi.Record, 0, len(change.Records))
+
+		for _, rec := range change.Records {
+			content := ensureQuotedContent(change.Type, rec.Content)
+			disabled := rec.Disabled
+			records = append(records, pdnsapi.Record{
+				Content:  &content,
+				Disabled: &disabled,
+			})
+		}
+
+		name := change.Name
+		if !strings.HasSuffix(name, ".") {
+			name += "."
+		}
+
+		rrType := pdnsapi.RRType(change.Type)
+		ttl := change.TTL
+
+		var changeType pdnsapi.ChangeType
+		if change.Existed && len(records) == 0 {
+			changeType = pdnsapi.ChangeTypeDelete
+		} else {
+			changeType = pdnsapi.ChangeTypeReplace
+		}
+
+		// Always include comment to allow clearing.
+		commentContent := change.Comment
+		commentAccount := ""
+		comments := []pdnsapi.Comment{
+			{Content: &commentContent, Account: &commentAccount},
+		}
+
+		rrSets = append(rrSets, pdnsapi.RRset{
+			Name:       &name,
+			Type:       &rrType,
+			TTL:        &ttl,
+			ChangeType: &changeType,
+			Records:    records,
+			Comments:   comments,
+		})
+	}
+
+	return rrSets
+}
+
+// getZoneOrRender validates PDNS client availability and fetches the zone; renders errors when needed.
+func (s *Service) getZoneOrRender(c fiber.Ctx, nav *navigation.Context, zoneName string) (*pdnsapi.Zone, error) {
+	if powerdns.Engine.Client == nil {
+		log.Error().Msg(powerdns.ErrMsgClientNotInitialized)
+
+		return nil, c.Status(fiber.StatusInternalServerError).Render(TemplateName, fiber.Map{
+			"Navigation": nav,
+			"Error":      powerdns.ErrMsgClientNotInitializedDetailed,
+		}, handler.BaseLayout)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
+	zone, err := powerdns.Engine.Zones.Get(ctx, zoneName)
+	if err != nil {
+		log.Error().Err(err).Str("zone_name", zoneName).Msg("failed to fetch zone")
+
+		return nil, c.Status(fiber.StatusNotFound).Render(TemplateName, fiber.Map{
+			"Navigation": nav,
+			"Error":      "Zone not found: " + zoneName,
+		}, handler.BaseLayout)
+	}
+
+	return zone, nil
+}
+
+// canAccessZone returns false when zone-tag restrictions are in effect and the
+// given zone is not in the user's accessible set. Returns true for admin users
+// and for any user with no tag assignments (unrestricted).
+func (s *Service) canAccessZone(c fiber.Ctx, zoneName string) bool {
+	user, ok := c.Locals("CurrentUser").(models.User)
+	if !ok || user.ID == 0 {
+		return false
+	}
+
+	if s.authService == nil {
+		return true
+	}
+
+	accessible, err := s.authService.GetAccessibleZoneIDs(user.ID)
+	if err != nil || accessible == nil {
+		return true
+	}
+
+	return accessible[zoneName]
+}
+
+// buildZoneLists queries the PowerDNS zone list and splits the results into
+// reverse (in-addr.arpa / ip6.arpa) and forward zone name slices.
+func buildZoneLists(ctx context.Context) (reverseZones, forwardZones []string) {
+	zones, err := powerdns.Engine.Zones.List(ctx)
+	if err != nil {
+		return
+	}
+
+	for i := range zones {
+		if zones[i].Name == nil {
+			continue
+		}
+
+		if zoneIsReverse(*zones[i].Name) {
+			reverseZones = append(reverseZones, *zones[i].Name)
+		} else {
+			forwardZones = append(forwardZones, *zones[i].Name)
+		}
+	}
+
+	return
+}
+
+// parseMasters splits a comma-separated master server string into a validated
+// slice. Returns an error when no valid entries are found.
+func parseMasters(mastersStr string) ([]string, error) {
+	var masters []string
+
+	for _, master := range strings.Split(mastersStr, ",") {
+		if trimmed := strings.TrimSpace(master); trimmed != "" {
+			masters = append(masters, trimmed)
+		}
+	}
+
+	if len(masters) == 0 {
+		return nil, errors.New("master servers are required for Slave zones")
+	}
+
+	return masters, nil
+}
+
+// currentUserFromSession extracts the current user's ID and username from the
+// session cookie. Returns nil userID and an empty username when no valid session
+// is present.
+func currentUserFromSession(c fiber.Ctx) (*uint64, string) {
+	sid := c.Cookies("session")
+	if sid == "" {
+		return nil, ""
+	}
+
+	sd := new(session.Data)
+	if err := sd.Read(sid); err != nil || sd.User.ID == 0 {
+		return nil, ""
+	}
+
+	id := sd.User.ID
+
+	return &id, sd.User.Username
+}

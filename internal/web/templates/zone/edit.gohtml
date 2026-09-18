@@ -1,0 +1,943 @@
+<!--begin::App Wrapper-->
+<div class="app-wrapper">
+    {{ template "partials/header-navigation" .}}
+    {{ template "partials/sidebar-navigation" .}}
+    <!--begin::App Main-->
+    <main class="app-main">
+    <!--begin::App Content Header-->
+    <div class="app-content-header">
+        <!--begin::Container-->
+        <div class="container-fluid">
+            <!--begin::Row-->
+            <div class="row">
+                <div class="col-sm-6">
+                    <h3 class="mb-0">{{.Navigation.PageTitle}}</h3>
+                </div>
+                <div class="col-sm-6">
+                    <ol class="breadcrumb float-sm-end">
+                        {{range .Navigation.Breadcrumbs}}
+                        {{if .Active}}
+                        <li class="breadcrumb-item active" aria-current="page">{{.Title}}</li>
+                        {{else}}
+                        <li class="breadcrumb-item"><a href="{{.URL}}">{{.Title}}</a></li>
+                        {{end}}
+                        {{end}}
+                    </ol>
+                </div>
+            </div>
+            <!--end::Row-->
+        </div>
+        <!--end::Container-->
+    </div>
+    <!--end::App Content Header-->
+    <!--begin::App Content-->
+    <div class="app-content">
+        <!--begin::Container-->
+        <div class="container-fluid">
+            <!--begin::Row-->
+            <div class="row">
+                <div class="col-12">
+
+                    <!-- Page-level toast container (used by zone-settings.js and zone-edit.js) -->
+                    <div class="toast-container position-fixed top-0 end-0 p-3" id="toast-container"
+                         {{if .Success}}data-flash-success="{{.Success}}"{{end}}></div>
+
+                    <!--begin::Zone Settings Card (collapsed by default, open after form submit)-->
+                    <div class="card card-primary card-outline mb-4 {{if not (or .Success .Error)}}collapsed-card{{end}}">
+                        <!--begin::Header-->
+                        <div class="card-header">
+                            <div class="card-title">
+                                <i class="bi bi-gear me-1"></i> Zone Settings: {{.Form.Name}}
+                            </div>
+                            <div class="card-tools">
+                                <button type="button" class="btn btn-tool" data-lte-toggle="card-collapse" title="Expand / Collapse">
+                                    <i data-lte-icon="expand" class="bi bi-plus-lg"></i>
+                                    <i data-lte-icon="collapse" class="bi bi-dash-lg"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <!--end::Header-->
+                        <!--begin::Body-->
+                        <div class="card-body" {{if not (or .Success .Error)}}style="display: none;"{{end}}>
+                            <!--begin::Form-->
+                            <form id="zone-settings-form" method="POST" action="/zone/edit/{{.Form.Name}}">
+                                {{if .Error}}
+                                <!--begin::Alert-->
+                                <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                                    <strong>Error!</strong>
+                                    {{if eq (printf "%T" .Error) "string"}}
+                                        {{.Error}}
+                                    {{else}}
+                                        <ul class="mb-0">
+                                            {{range .Error}}
+                                                <li>{{.}}</li>
+                                            {{end}}
+                                        </ul>
+                                    {{end}}
+                                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                                </div>
+                                <!--end::Alert-->
+                                {{end}}
+
+                                <!--begin::Zone Name (Read-only)-->
+                                <div class="mb-3">
+                                    <label for="zone-name" class="form-label">Zone Name <span class="text-danger">*</span></label>
+                                    <input type="text" class="form-control" id="zone-name" value="{{.Form.Name}}" disabled>
+                                    <div class="form-text">Zone name cannot be changed after creation.</div>
+                                </div>
+                                <!--end::Zone Name-->
+
+                                <!--begin::Zone Type-->
+                                <div class="mb-3">
+                                    <label for="zone-kind" class="form-label">Zone Type <span class="text-danger">*</span></label>
+                                    <select class="form-select" id="zone-kind" name="kind" required>
+                                        <option value="Native" {{if eq .Form.Kind "Native"}}selected{{end}}>Native — Authoritative, no replication</option>
+                                        <option value="Master" {{if eq .Form.Kind "Master"}}selected{{end}}>Primary (Master) — Authoritative with replication</option>
+                                        <option value="Slave" {{if eq .Form.Kind "Slave"}}selected{{end}}>Secondary (Slave) — Replicated from master</option>
+                                    </select>
+                                    <div class="form-text">Changing to/from Slave may require additional configuration.</div>
+                                </div>
+                                <!--end::Zone Type-->
+
+                                <!--begin::Masters (for Slave zones)-->
+                                <div class="mb-3" id="masters-field" style="display: {{if eq .Form.Kind "Slave"}}block{{else}}none{{end}};">
+                                    <label for="masters" class="form-label">Master Servers <span class="text-danger">*</span></label>
+                                    <input type="text" class="form-control" id="masters" name="masters"
+                                           placeholder="192.168.1.1, 192.168.1.2" value="{{.Form.Masters}}">
+                                    <div class="form-text">Comma-separated list of master server IP addresses for zone transfers.</div>
+                                </div>
+                                <!--end::Masters-->
+
+                                <!--begin::Auto-PTR (forward non-slave zones only)-->
+                                {{if and (not .IsReverse) (ne .Form.Kind "Slave")}}
+                                <div class="mb-3">
+                                    <label class="form-label">Reverse DNS</label>
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="auto-ptr" name="auto_ptr" value="true"
+                                               {{if .Form.AutoPTR}}checked{{end}}>
+                                        <label class="form-check-label" for="auto-ptr">
+                                            Auto-create PTR records for A / AAAA changes
+                                        </label>
+                                    </div>
+                                    <div class="form-text">
+                                        When enabled, saving A or AAAA records automatically creates or updates the
+                                        matching PTR record in the appropriate reverse zone (if one exists in PowerDNS).
+                                        PTR records for removed IPs are deleted automatically.
+                                    </div>
+                                    {{if not .ReverseZoneNames}}
+                                    <div class="callout callout-warning mt-2 small">
+                                        <i class="bi bi-exclamation-triangle me-1"></i>
+                                        No reverse zones found in PowerDNS. PTR records cannot be created until a
+                                        reverse zone (e.g. <code>1.168.192.in-addr.arpa.</code>) is added.
+                                    </div>
+                                    {{end}}
+                                </div>
+                                {{end}}
+                                <!--end::Auto-PTR-->
+
+                                <!--begin::SOA-EDIT-API-->
+                                <div class="mb-3">
+                                    <label for="soa-edit-api" class="form-label">SOA-EDIT-API <span class="text-danger">*</span></label>
+                                    <select class="form-select" id="soa-edit-api" name="soa_edit_api" required
+                                            onchange="document.getElementById('soa-edit-api-off-warn').style.display = this.value === 'OFF' ? '' : 'none'">
+                                        <option value="DEFAULT" {{if eq .Form.SOAEditAPI "DEFAULT"}}selected{{end}}>DEFAULT — Use server default</option>
+                                        <option value="INCREASE" {{if eq .Form.SOAEditAPI "INCREASE"}}selected{{end}}>INCREASE — Increment serial on update</option>
+                                        <option value="EPOCH" {{if eq .Form.SOAEditAPI "EPOCH"}}selected{{end}}>EPOCH — Set serial to current timestamp</option>
+                                        <option value="OFF" {{if eq .Form.SOAEditAPI "OFF"}}selected{{end}}>OFF — Do not auto-update serial</option>
+                                    </select>
+                                    <div class="form-text">Controls how the SOA serial number is updated when records change.</div>
+                                    <div id="soa-edit-api-off-warn" class="callout callout-warning mt-2 small"
+                                         style="{{ if ne .Form.SOAEditAPI "OFF" }}display:none{{ end }}">
+                                        <i class="bi bi-exclamation-triangle me-1"></i>
+                                        <strong>OFF</strong> disables automatic serial updates via the API.
+                                        Secondary servers may not detect zone changes and fail to sync.
+                                        Only use this if serial management is handled at the server level via <code>default-soa-edit</code>.
+                                    </div>
+                                </div>
+                                <!--end::SOA-EDIT-API-->
+                            </form>
+                            <!--end::Form-->
+                        </div>
+                        <!--end::Body-->
+                        <!--begin::Footer-->
+                        <div class="card-footer" {{if not (or .Success .Error)}}style="display: none;"{{end}}>
+                            <button type="button" class="btn btn-outline-danger btn-sm float-end" id="delete-zone-btn" data-zone-name="{{.Form.Name}}">
+                                <i class="bi bi-trash me-1"></i> Delete Zone
+                            </button>
+                            <button type="submit" form="zone-settings-form" class="btn btn-primary">
+                                <i class="bi bi-save"></i> Update Zone
+                            </button>
+                            <a href="/dashboard" class="btn btn-secondary ms-2">
+                                <i class="bi bi-x-circle"></i> Cancel
+                            </a>
+                        </div>
+                        <!--end::Footer-->
+                    </div>
+                    <!--end::Zone Settings Card-->
+
+                    <!--begin::DNSSEC Card (Native and Master zones only)-->
+                    {{if or (eq .Form.Kind "Native") (eq .Form.Kind "Master")}}
+                    <div class="card card-warning card-outline mb-4 collapsed-card" id="dnssec-card"
+                         x-data="dnssecManager('{{.Form.Name}}', {{if .DNSSECEnabled}}true{{else}}false{{end}})">
+                        <!--begin::Header-->
+                        <div class="card-header d-flex align-items-center">
+                            <div class="card-title mb-0 me-2">
+                                <i class="bi bi-shield-lock me-1"></i> DNSSEC
+                            </div>
+                            <template x-if="enabled">
+                                <span class="badge bg-success ms-1"><i class="bi bi-shield-check me-1"></i>Enabled</span>
+                            </template>
+                            <template x-if="!enabled">
+                                <span class="badge bg-secondary ms-1">Disabled</span>
+                            </template>
+                            <div class="card-tools ms-auto">
+                                <button type="button" class="btn btn-tool" data-lte-toggle="card-collapse"
+                                        title="Expand / Collapse" @click="onToggle()">
+                                    <i data-lte-icon="expand" class="bi bi-plus-lg"></i>
+                                    <i data-lte-icon="collapse" class="bi bi-dash-lg"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <!--end::Header-->
+                        <!--begin::Body-->
+                        <div class="card-body">
+                            <!-- Loading spinner -->
+                            <template x-if="!loaded">
+                                <div class="text-center py-3">
+                                    <span class="spinner-border spinner-border-sm text-secondary me-2"></span>
+                                    Loading DNSSEC status…
+                                </div>
+                            </template>
+
+                            <!-- Error -->
+                            <template x-if="loaded && error">
+                                <div class="alert alert-danger mb-0" x-text="error"></div>
+                            </template>
+
+                            <!-- Disabled state -->
+                            <template x-if="loaded && !error && !enabled">
+                                <div>
+                                    <div class="callout callout-warning mb-3">
+                                        <i class="bi bi-info-circle me-1"></i>
+                                        DNSSEC is <strong>not enabled</strong> for this zone.
+                                        Enabling it will generate a Combined Signing Key (CSK) using the PowerDNS server default algorithm.
+                                    </div>
+                                    <button class="btn btn-warning" @click="enableDNSSEC()" :disabled="busy">
+                                        <span x-show="busy" class="spinner-border spinner-border-sm me-1"></span>
+                                        <i x-show="!busy" class="bi bi-shield-plus me-1"></i>
+                                        Enable DNSSEC
+                                    </button>
+                                </div>
+                            </template>
+
+                            <!-- Enabled state: key table -->
+                            <template x-if="loaded && !error && enabled">
+                                <div>
+                                    <div class="table-responsive mb-3">
+                                        <table class="table table-sm table-hover mb-0">
+                                            <thead>
+                                                <tr>
+                                                    <th>ID</th>
+                                                    <th>Type</th>
+                                                    <th>Algorithm</th>
+                                                    <th>Bits</th>
+                                                    <th>Active</th>
+                                                    <th>Published</th>
+                                                    <th>DS Records</th>
+                                                    <th></th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <template x-for="key in keys" :key="key.id">
+                                                    <tr>
+                                                        <td x-text="key.id" class="text-muted small align-middle"></td>
+                                                        <td class="align-middle">
+                                                            <span class="badge bg-light text-dark border text-uppercase" x-text="key.key_type"></span>
+                                                        </td>
+                                                        <td class="align-middle" x-text="key.algorithm"></td>
+                                                        <td class="align-middle" x-text="key.bits || '—'"></td>
+                                                        <td class="align-middle">
+                                                            <span :class="key.active ? 'badge bg-success' : 'badge bg-danger'"
+                                                                  x-text="key.active ? 'Active' : 'Inactive'"></span>
+                                                        </td>
+                                                        <td class="align-middle">
+                                                            <span :class="key.published ? 'badge bg-success' : 'badge bg-secondary'"
+                                                                  x-text="key.published ? 'Published' : 'Hidden'"></span>
+                                                        </td>
+                                                        <td class="align-middle">
+                                                            <template x-if="key.ds && key.ds.length > 0">
+                                                                <button class="btn btn-sm btn-outline-secondary"
+                                                                        @click="showDS(key)"
+                                                                        title="View DS records">
+                                                                    <i class="bi bi-clipboard me-1"></i>DS
+                                                                </button>
+                                                            </template>
+                                                            <template x-if="!key.ds || key.ds.length === 0">
+                                                                <span class="text-muted small">—</span>
+                                                            </template>
+                                                        </td>
+                                                        <td class="align-middle text-end">
+                                                            <div class="dropdown">
+                                                                <button type="button" class="btn btn-sm btn-light"
+                                                                        data-bs-toggle="dropdown" aria-expanded="false"
+                                                                        data-bs-boundary="viewport">
+                                                                    <i class="bi bi-three-dots-vertical"></i>
+                                                                </button>
+                                                                <ul class="dropdown-menu dropdown-menu-end">
+                                                                    <li>
+                                                                        <button class="dropdown-item" type="button"
+                                                                                @click="toggleActive(key)">
+                                                                            <i class="bi me-2"
+                                                                               :class="key.active ? 'bi-pause-circle text-warning' : 'bi-play-circle text-success'"></i>
+                                                                            <span x-text="key.active ? 'Deactivate' : 'Activate'"></span>
+                                                                        </button>
+                                                                    </li>
+                                                                    <li>
+                                                                        <button class="dropdown-item" type="button"
+                                                                                @click="togglePublished(key)">
+                                                                            <i class="bi me-2"
+                                                                               :class="key.published ? 'bi-eye-slash text-warning' : 'bi-eye text-success'"></i>
+                                                                            <span x-text="key.published ? 'Unpublish' : 'Publish'"></span>
+                                                                        </button>
+                                                                    </li>
+                                                                    <li><hr class="dropdown-divider"></li>
+                                                                    <li>
+                                                                        <button class="dropdown-item text-danger" type="button"
+                                                                                @click="confirmDeleteKey(key)">
+                                                                            <i class="bi bi-trash me-2"></i>Delete Key
+                                                                        </button>
+                                                                    </li>
+                                                                </ul>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                </template>
+                                            </tbody>
+                                        </table>
+                                    </div>
+
+                                    <div class="d-flex gap-2 flex-wrap">
+                                        <button class="btn btn-outline-danger btn-sm"
+                                                @click="disableDNSSEC()" :disabled="busy">
+                                            <span x-show="busy" class="spinner-border spinner-border-sm me-1"></span>
+                                            <i x-show="!busy" class="bi bi-shield-x me-1"></i>
+                                            Disable DNSSEC
+                                        </button>
+                                        <button class="btn btn-outline-info btn-sm"
+                                                @click="checkChain()" :disabled="chainBusy">
+                                            <span x-show="chainBusy" class="spinner-border spinner-border-sm me-1"></span>
+                                            <i x-show="!chainBusy" class="bi bi-link-45deg me-1"></i>
+                                            Verify Trust Chain
+                                        </button>
+                                    </div>
+
+                                    <!-- Trust chain results -->
+                                    <template x-if="chainError">
+                                        <div class="alert alert-danger mt-3 mb-0" x-text="chainError"></div>
+                                    </template>
+                                    <template x-if="chainResult">
+                                        <div class="mt-3">
+                                            <div :class="chainResult.valid ? 'alert alert-success mb-2' : 'alert alert-danger mb-2'">
+                                                <i :class="chainResult.valid ? 'bi bi-shield-check me-1' : 'bi bi-shield-x me-1'"></i>
+                                                <strong x-text="chainResult.valid ? 'Trust chain is valid.' : 'Trust chain is broken.'"></strong>
+                                                <span x-show="!chainResult.valid" class="ms-1" x-text="chainResult.reason"></span>
+                                            </div>
+                                            <div class="table-responsive">
+                                                <table class="table table-sm table-bordered mb-0">
+                                                    <thead>
+                                                        <tr>
+                                                            <th style="width:1%">Status</th>
+                                                            <th>Zone</th>
+                                                            <th>Detail</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        <template x-for="link in chainResult.links" :key="link.zone">
+                                                            <tr>
+                                                                <td class="align-middle text-center">
+                                                                    <i :class="{
+                                                                        'bi bi-check-circle-fill text-success': link.status === 'ok',
+                                                                        'bi bi-x-circle-fill text-danger': link.status === 'missing',
+                                                                        'bi bi-exclamation-circle-fill text-warning': link.status === 'error'
+                                                                    }"></i>
+                                                                </td>
+                                                                <td class="align-middle font-monospace small" x-text="link.zone"></td>
+                                                                <td class="align-middle small text-muted" x-text="link.detail"></td>
+                                                            </tr>
+                                                        </template>
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </template>
+                        </div>
+                        <!--end::Body-->
+                    </div>
+                    <!--end::DNSSEC Card-->
+
+                    <!-- DS Records Modal -->
+                    <div class="modal fade" id="dsModal" tabindex="-1" aria-labelledby="dsModalLabel">
+                        <div class="modal-dialog modal-lg">
+                            <div class="modal-content">
+                                <div class="modal-header">
+                                    <h5 class="modal-title" id="dsModalLabel">
+                                        <i class="bi bi-clipboard me-1"></i> DS Records
+                                    </h5>
+                                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                </div>
+                                <div class="modal-body" id="ds-modal-body">
+                                    <!-- filled by JS -->
+                                </div>
+                                <div class="modal-footer">
+                                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Delete Key Confirm Modal -->
+                    <div class="modal fade" id="deleteKeyModal" tabindex="-1" aria-labelledby="deleteKeyModalLabel">
+                        <div class="modal-dialog">
+                            <div class="modal-content">
+                                <div class="modal-header bg-danger text-white">
+                                    <h5 class="modal-title" id="deleteKeyModalLabel">
+                                        <i class="bi bi-exclamation-triangle me-1"></i> Delete Cryptokey
+                                    </h5>
+                                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                                </div>
+                                <div class="modal-body">
+                                    <div class="callout callout-warning">
+                                        Deleting this key is <strong>irreversible</strong>.
+                                        If it is the only active signing key, DNSSEC will stop working for this zone.
+                                        Ensure any DS records in the parent zone are removed first.
+                                    </div>
+                                    <p class="mb-0">Key ID: <strong x-text="pendingDeleteKeyID"></strong></p>
+                                </div>
+                                <div class="modal-footer">
+                                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                    <button type="button" class="btn btn-danger" @click="deleteKey()">
+                                        <i class="bi bi-trash me-1"></i> Delete Key
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <script src="/static/js/dnssec-manager.js"></script>
+                    {{end}}
+                    <!--end::DNSSEC Card-->
+
+                    {{if or (eq .Form.Kind "Native") (eq .Form.Kind "Master")}}
+                    <!--begin::Alpine zone editor — wraps DNS records card + modals-->
+                    <script type="application/json" id="zone-data">{{.InitDataJSON}}</script>
+                    <div x-data="zoneEditor()" id="zone-editor">
+
+
+                        <!--begin::DNS Records Card-->
+                        <div class="card card-success card-outline mb-4">
+                            <!--begin::Header-->
+                            <div class="card-header records-card-header d-flex flex-column gap-2">
+                                <!--begin::Title row-->
+                                <div class="d-flex align-items-center flex-wrap gap-2">
+                                    <div class="card-title mb-0 me-1">
+                                        <i class="bi bi-list-ul me-1"></i> DNS Records
+                                    </div>
+                                    <span class="badge bg-secondary" x-text="filteredRecords.length"></span>
+                                    {{if .Zone}}
+                                    <span class="text-muted small ms-1">
+                                        {{.Form.Kind}}{{if .Zone.Serial}} · Serial {{.Zone.Serial}}{{end}}
+                                    </span>
+                                    {{end}}
+                                </div>
+                                <!--end::Title row-->
+
+                                <!--begin::Toolbar row (filters left, actions right)-->
+                                <div class="d-flex align-items-center flex-wrap gap-2">
+                                    <!--begin::Type Filter Dropdown-->
+                                    <div class="dropdown">
+                                        <button type="button" class="btn btn-sm btn-outline-secondary dropdown-toggle"
+                                                data-bs-toggle="dropdown" aria-expanded="false">
+                                            Type: <span class="fw-semibold" x-text="activeTypeFilter === 'all' ? 'All' : activeTypeFilter"></span>
+                                        </button>
+                                        <ul class="dropdown-menu" style="max-height: 60vh; overflow-y: auto;">
+                                            <li>
+                                                <a class="dropdown-item d-flex align-items-center justify-content-between"
+                                                   :class="{ active: activeTypeFilter === 'all' }" href="#" @click.prevent="setTypeFilter('all')">
+                                                    <span>All types</span>
+                                                    <i class="bi bi-check2 ms-3" x-show="activeTypeFilter === 'all'"></i>
+                                                </a>
+                                            </li>
+                                            <li><hr class="dropdown-divider"></li>
+                                            <template x-for="t in availableTypes" :key="t">
+                                                <li>
+                                                    <a class="dropdown-item d-flex align-items-center justify-content-between"
+                                                       :class="{ active: activeTypeFilter === t }" href="#" @click.prevent="setTypeFilter(t)">
+                                                        <span>
+                                                            <span x-text="t"></span>
+                                                            <span x-show="isNewType(t)" class="badge bg-warning text-dark ms-1">new</span>
+                                                        </span>
+                                                        <i class="bi bi-check2 ms-3" x-show="activeTypeFilter === t"></i>
+                                                    </a>
+                                                </li>
+                                            </template>
+                                        </ul>
+                                    </div>
+                                    <!--end::Type Filter Dropdown-->
+                                    <div class="input-group input-group-sm" style="width: 200px;">
+                                        <input type="text" x-model="searchQuery" class="form-control" placeholder="Search name or data…">
+                                        <span class="input-group-text"><i class="bi bi-search"></i></span>
+                                    </div>
+
+                                    <!--begin::Action buttons (grouped; right-aligned from sm up, left on very small screens)-->
+                                    <div class="d-flex align-items-center flex-wrap gap-2 ms-sm-auto">
+                                        <span class="badge text-bg-warning" x-show="pendingCount > 0" x-cloak>
+                                            <i class="bi bi-exclamation-circle me-1"></i><span x-text="pendingCount"></span> unsaved
+                                        </span>
+                                        <button type="button" class="btn btn-sm btn-success" @click="openAddRecord()">
+                                            <i class="bi bi-plus-circle me-1"></i> Add Record
+                                        </button>
+                                        <button type="button" class="btn btn-sm btn-success" @click="saveChanges()" :disabled="isSaving">
+                                            <span x-show="isSaving" class="spinner-border spinner-border-sm me-1" role="status"></span>
+                                            <i x-show="!isSaving" class="bi bi-save me-1"></i>
+                                            <span x-text="isSaving ? 'Saving…' : 'Save Changes'"></span>
+                                        </button>
+                                        <button type="button" class="btn btn-sm btn-outline-secondary" @click="discardChanges()" :disabled="isSaving">
+                                            <i class="bi bi-x-circle me-1"></i> Discard
+                                        </button>
+                                    </div>
+                                    <!--end::Action buttons-->
+                                </div>
+                                <!--end::Toolbar row-->
+                            </div>
+                            <!--end::Header-->
+
+                            <!--begin::Body-->
+                            <div class="card-body p-0">
+                                <div class="table-responsive">
+                                    <table class="table table-striped table-hover mb-0">
+                                        <thead>
+                                            <tr>
+                                                <th style="cursor:pointer" @click="toggleSort('name')">
+                                                    Name
+                                                    <i class="bi ms-1" :class="sortField==='name' ? (sortAsc ? 'bi-caret-up-fill' : 'bi-caret-down-fill') : 'bi-caret-up text-muted'"></i>
+                                                </th>
+                                                <th style="cursor:pointer" @click="toggleSort('type')">
+                                                    Type
+                                                    <i class="bi ms-1" :class="sortField==='type' ? (sortAsc ? 'bi-caret-up-fill' : 'bi-caret-down-fill') : 'bi-caret-up text-muted'"></i>
+                                                </th>
+                                                <th style="cursor:pointer" @click="toggleSort('ttl')">
+                                                    TTL
+                                                    <i class="bi ms-1" :class="sortField==='ttl' ? (sortAsc ? 'bi-caret-up-fill' : 'bi-caret-down-fill') : 'bi-caret-up text-muted'"></i>
+                                                </th>
+                                                <th>Status</th>
+                                                <th>Data</th>
+                                                <th>Comment</th>
+                                                <th width="48"></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <template x-for="record in paginatedRecords" :key="recordId(record)">
+                                                <tr :id="'rec-' + CSS.escape(record.name)" :class="recordRowClass(record)">
+                                                    <td class="record-name" x-text="record.display_name"></td>
+                                                    <td class="record-type">
+                                                        <span class="badge bg-light text-dark border" x-text="record.type"></span>
+                                                    </td>
+                                                    <td class="record-ttl text-nowrap" x-text="record.ttl"></td>
+                                                    <td class="record-status">
+                                                        <span :class="record.disabled ? 'badge bg-danger' : 'badge bg-success'"
+                                                              x-text="record.disabled ? 'Disabled' : 'Active'"></span>
+                                                    </td>
+                                                    <td class="record-content" style="max-width:220px;">
+                                                        <span class="d-inline-block text-truncate mw-100 align-bottom" :title="record.content" x-text="record.content"></span>
+                                                        <template x-if="ptrZoneLink(record)">
+                                                            <a :href="ptrZoneLink(record)" class="badge bg-light text-secondary border text-decoration-none ms-1 small"
+                                                               title="Open PTR record in reverse zone">
+                                                                <i class="bi bi-arrow-left-right me-1"></i>PTR
+                                                            </a>
+                                                        </template>
+                                                        <template x-if="forwardZoneLink(record)">
+                                                            <a :href="forwardZoneLink(record)" class="badge bg-light text-secondary border text-decoration-none ms-1 small"
+                                                               title="Open forward zone">
+                                                                <i class="bi bi-arrow-left-right me-1"></i>fwd
+                                                            </a>
+                                                        </template>
+                                                    </td>
+                                                    <td class="record-comment text-truncate text-muted" style="max-width:150px;"
+                                                        :title="record.comment" x-text="record.comment"></td>
+                                                    <td class="text-end">
+                                                        <div class="dropdown">
+                                                            <button type="button" class="btn btn-sm btn-light"
+                                                                    data-bs-toggle="dropdown" aria-expanded="false"
+                                                                    data-bs-boundary="viewport">
+                                                                <i class="bi bi-three-dots-vertical"></i>
+                                                            </button>
+                                                            <ul class="dropdown-menu dropdown-menu-end">
+                                                                <li>
+                                                                    <button class="dropdown-item" type="button"
+                                                                            @click="openEditRecord(record)">
+                                                                        <i class="bi bi-pencil me-2 text-primary"></i>Edit
+                                                                    </button>
+                                                                </li>
+                                                                <template x-if="record.type !== 'SOA'">
+                                                                    <div>
+                                                                        <li><hr class="dropdown-divider"></li>
+                                                                        <li>
+                                                                            <button class="dropdown-item text-danger" type="button"
+                                                                                    @click="deleteRecord(record)">
+                                                                                <i class="bi bi-trash me-2"></i>Delete
+                                                                            </button>
+                                                                        </li>
+                                                                    </div>
+                                                                </template>
+                                                            </ul>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            </template>
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <!--begin::Empty State-->
+                                <div class="text-center text-muted py-5" x-show="filteredRecords.length === 0">
+                                    <i class="bi bi-inbox fs-2"></i>
+                                    <p class="mt-2 mb-0" x-show="searchQuery || activeTypeFilter !== 'all'">No records match your filter.</p>
+                                    <p class="mt-2 mb-0" x-show="!searchQuery && activeTypeFilter === 'all'">No records yet.</p>
+                                </div>
+                                <!--end::Empty State-->
+                            </div>
+                            <!--end::Body-->
+
+                            <!--begin::Footer-->
+                            <div class="card-footer d-flex align-items-center flex-wrap gap-2">
+                                <!-- Page size + pagination (right-aligned) -->
+                                <div class="d-flex align-items-center gap-2 ms-auto flex-wrap">
+                                    <label class="small text-muted mb-0">Rows:</label>
+                                    <select class="form-select form-select-sm" style="width:auto"
+                                            @change="changePageSize($event.target.value)" :value="pageSize">
+                                        <option value="10">10</option>
+                                        <option value="25">25</option>
+                                        <option value="50">50</option>
+                                        <option value="100">100</option>
+                                    </select>
+
+                                    <template x-if="totalPages > 1">
+                                        <nav aria-label="Records pagination">
+                                            <ul class="pagination pagination-sm mb-0">
+                                                <li class="page-item" :class="{ disabled: currentPage <= 1 }">
+                                                    <button type="button" class="page-link" @click="if(currentPage>1) currentPage--">«</button>
+                                                </li>
+                                                <li class="page-item disabled">
+                                                    <span class="page-link" x-text="`${currentPage} / ${totalPages}`"></span>
+                                                </li>
+                                                <li class="page-item" :class="{ disabled: currentPage >= totalPages }">
+                                                    <button type="button" class="page-link" @click="if(currentPage<totalPages) currentPage++">»</button>
+                                                </li>
+                                            </ul>
+                                        </nav>
+                                    </template>
+                                </div>
+                            </div>
+                            <!--end::Footer-->
+                        </div>
+                        <!--end::DNS Records Card-->
+
+                        <!-- Record Edit/Add Modal -->
+                        <div class="modal fade" id="recordModal" tabindex="-1" aria-labelledby="recordModalLabel">
+                            <div class="modal-dialog">
+                                <div class="modal-content">
+                                    <div class="modal-header">
+                                        <h5 class="modal-title" id="recordModalLabel"
+                                            x-text="recordForm.isEditing ? 'Edit Record' : 'Add Record'"></h5>
+                                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                    </div>
+                                    <div class="modal-body">
+                                        <form id="record-form">
+                                            <div class="mb-3">
+                                                <label for="record-name-input" class="form-label">Name <span class="text-danger">*</span></label>
+                                                <input type="text" class="form-control" id="record-name-input"
+                                                       x-model="recordForm.name" required placeholder="www or test or @">
+                                                <div class="form-text">
+                                                    Subdomain (e.g. <code>www</code>, <code>mail</code>). Use <code>@</code> for the zone apex.
+                                                </div>
+                                            </div>
+
+                                            <div class="row g-3 mb-3">
+                                                <div class="col-auto">
+                                                    <label for="record-type-input" class="form-label">Type <span class="text-danger">*</span></label>
+                                                    <!-- Add mode: dropdown (drives field switching) -->
+                                                    <select class="form-select" id="record-type-input" x-model="recordForm.type"
+                                                            x-show="!recordForm.isEditing" required :disabled="recordForm.isEditing">
+                                                        {{range .AllowedRecordTypes}}{{if ne .Type "SOA"}}
+                                                        <option value="{{.Type}}">{{.Type}}{{if .Description}} — {{.Description}}{{end}}</option>
+                                                        {{end}}{{end}}
+                                                    </select>
+                                                    <!-- Edit mode: read-only badge (type cannot change) -->
+                                                    <div x-show="recordForm.isEditing" class="form-control-plaintext">
+                                                        <span class="badge bg-light text-dark border fs-6" x-text="recordForm.type"></span>
+                                                    </div>
+                                                </div>
+                                                <div class="col">
+                                                    <label for="record-ttl-preset" class="form-label">TTL <span class="text-danger">*</span></label>
+                                                    <select class="form-select" id="record-ttl-preset"
+                                                            x-model="recordForm.ttlPreset"
+                                                            @change="onTTLPresetChange()">
+                                                        <template x-for="p in ttlPresets" :key="p.seconds">
+                                                            <option :value="String(p.seconds)"
+                                                                    x-text="p.label + ' (' + p.seconds + 's)'"></option>
+                                                        </template>
+                                                        <option value="custom">Custom…</option>
+                                                    </select>
+                                                    <input type="number" class="form-control mt-1" id="record-ttl-input"
+                                                           x-show="recordForm.ttlPreset === 'custom'"
+                                                           x-model.number="recordForm.ttl"
+                                                           :required="recordForm.ttlPreset === 'custom'"
+                                                           min="1" placeholder="seconds">
+                                                    <div class="form-text"
+                                                         x-show="recordForm.ttlPreset !== 'custom'"
+                                                         x-text="recordForm.ttl + ' seconds'"></div>
+                                                </div>
+                                            </div>
+
+                                            <!-- Generic Data field (hidden and disabled for MX / TXT) -->
+                                            <div class="mb-3" x-show="recordForm.type !== 'MX' && recordForm.type !== 'TXT'">
+                                                <label for="record-content-input" class="form-label">Data <span class="text-danger">*</span></label>
+                                                <input type="text" class="form-control" id="record-content-input"
+                                                       x-model="recordForm.content"
+                                                       :required="recordForm.type !== 'MX' && recordForm.type !== 'TXT'"
+                                                       :disabled="recordForm.type === 'MX' || recordForm.type === 'TXT'">
+                                                <div class="form-text" x-text="recordContentHelp"></div>
+                                            </div>
+
+                                            <!-- MX fields -->
+                                            <div x-show="recordForm.type === 'MX'">
+                                                <div class="row g-3 mb-3">
+                                                    <div class="col-4">
+                                                        <label for="record-mx-priority" class="form-label">Priority <span class="text-danger">*</span></label>
+                                                        <input type="number" class="form-control" id="record-mx-priority"
+                                                               x-model.number="recordForm.mxPriority" min="0" max="65535"
+                                                               :required="recordForm.type === 'MX'"
+                                                               :disabled="recordForm.type !== 'MX'">
+                                                        <div class="form-text">0 = highest priority</div>
+                                                    </div>
+                                                    <div class="col-8">
+                                                        <label for="record-mx-hostname" class="form-label">Mail Server <span class="text-danger">*</span></label>
+                                                        <input type="text" class="form-control" id="record-mx-hostname"
+                                                               x-model="recordForm.mxHostname" placeholder="mail.example.com."
+                                                               :required="recordForm.type === 'MX'"
+                                                               :disabled="recordForm.type !== 'MX'">
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <!-- TXT fields -->
+                                            <div class="mb-3" x-show="recordForm.type === 'TXT'">
+                                                <label for="record-txt-text" class="form-label">Text Content <span class="text-danger">*</span></label>
+                                                <textarea class="form-control font-monospace" id="record-txt-text"
+                                                          x-model="recordForm.txtText" rows="4"
+                                                          placeholder="v=spf1 include:example.com ~all"
+                                                          :required="recordForm.type === 'TXT'"
+                                                          :disabled="recordForm.type !== 'TXT'"></textarea>
+                                                <div class="form-text">
+                                                    Enter plain text — quotes are added automatically.
+                                                    Strings longer than 255 characters are split into chunks automatically.
+                                                </div>
+                                            </div>
+
+                                            <div class="mb-3">
+                                                <label for="record-comment-input" class="form-label">Comment</label>
+                                                <textarea class="form-control" id="record-comment-input"
+                                                          x-model="recordForm.comment" rows="2" maxlength="255"></textarea>
+                                                <div class="form-text">Optional, max 255 characters</div>
+                                            </div>
+
+                                            <div class="form-check">
+                                                <input type="checkbox" class="form-check-input" id="record-disabled-input"
+                                                       x-model="recordForm.disabled">
+                                                <label class="form-check-label" for="record-disabled-input">Disabled</label>
+                                            </div>
+                                        </form>
+                                    </div>
+                                    <div class="modal-footer">
+                                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                        <button type="button" class="btn btn-primary" @click="saveRecord()">
+                                            <i class="bi me-1" :class="recordForm.isEditing ? 'bi-pencil' : 'bi-plus-circle'"></i>
+                                            <span x-text="recordForm.isEditing ? 'Update Record' : 'Add Record'"></span>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- SOA Edit Modal -->
+                        <div class="modal fade" id="soaModal" tabindex="-1" aria-labelledby="soaModalLabel" aria-hidden="true">
+                            <div class="modal-dialog">
+                                <div class="modal-content">
+                                    <div class="modal-header">
+                                        <h5 class="modal-title" id="soaModalLabel">Edit SOA Record</h5>
+                                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                    </div>
+                                    <div class="modal-body">
+                                        <form id="soa-form">
+                                            <div class="mb-3">
+                                                <label for="soa-mname" class="form-label">Primary Name Server <span class="text-danger">*</span></label>
+                                                <input type="text" class="form-control" id="soa-mname"
+                                                       x-model="soaForm.mname" required placeholder="ns1.example.com.">
+                                                <div class="form-text">Fully qualified domain name ending with a dot.</div>
+                                            </div>
+                                            <div class="mb-3">
+                                                <label for="soa-rname" class="form-label">Hostmaster Contact <span class="text-danger">*</span></label>
+                                                <input type="text" class="form-control" id="soa-rname"
+                                                       x-model="soaForm.rname" required placeholder="hostmaster.example.com.">
+                                                <div class="form-text">Contact in DNS RNAME format (e.g. <code>hostmaster.example.com.</code>).</div>
+                                            </div>
+                                            <div class="row g-3">
+                                                <div class="col-6">
+                                                    <label for="soa-serial" class="form-label">Serial <span class="text-danger">*</span></label>
+                                                    <input type="number" class="form-control" id="soa-serial"
+                                                           x-model="soaForm.serial" required min="1">
+                                                </div>
+                                                <div class="col-6">
+                                                    <label for="soa-refresh" class="form-label">Refresh (s) <span class="text-danger">*</span></label>
+                                                    <input type="number" class="form-control" id="soa-refresh"
+                                                           x-model="soaForm.refresh" required min="1">
+                                                </div>
+                                                <div class="col-6">
+                                                    <label for="soa-retry" class="form-label">Retry (s) <span class="text-danger">*</span></label>
+                                                    <input type="number" class="form-control" id="soa-retry"
+                                                           x-model="soaForm.retry" required min="1">
+                                                </div>
+                                                <div class="col-6">
+                                                    <label for="soa-expire" class="form-label">Expire (s) <span class="text-danger">*</span></label>
+                                                    <input type="number" class="form-control" id="soa-expire"
+                                                           x-model="soaForm.expire" required min="1">
+                                                </div>
+                                                <div class="col-6">
+                                                    <label for="soa-minimum" class="form-label">Minimum TTL (s) <span class="text-danger">*</span></label>
+                                                    <input type="number" class="form-control" id="soa-minimum"
+                                                           x-model="soaForm.minimum" required min="0">
+                                                </div>
+                                            </div>
+                                        </form>
+                                    </div>
+                                    <div class="modal-footer">
+                                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                        <button type="button" class="btn btn-primary" @click="saveSOA()">
+                                            <i class="bi bi-save me-1"></i> Save SOA
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Zone edit JavaScript (defines zoneEditor before Alpine defer fires) -->
+                        <script src="/static/js/zone-edit.js"></script>
+
+                    </div>
+                    <!--end::Alpine zone editor-->
+
+                    {{else if eq .Form.Kind "Slave"}}
+                    <!--begin::Records Card (Read-only for Slave)-->
+                    <div class="card card-info card-outline mb-4">
+                        <!--begin::Header-->
+                        <div class="card-header">
+                            <div class="card-title">
+                                <i class="bi bi-list-ul me-1"></i> DNS Records
+                                <span class="badge bg-info ms-2">Read-Only</span>
+                            </div>
+                        </div>
+                        <!--end::Header-->
+                        <!--begin::Body-->
+                        <div class="card-body p-0">
+                            <div class="callout callout-info m-3">
+                                <h6><i class="bi bi-info-circle me-1"></i> Secondary Zone</h6>
+                                Records are automatically synchronized from the master server and cannot be edited here.
+                                To modify records, update them on the primary server.
+                            </div>
+                                <table class="table table-striped mb-0">
+                                    <thead>
+                                        <tr>
+                                            <th>Name</th>
+                                            <th>Type</th>
+                                            <th>TTL</th>
+                                            <th>Status</th>
+                                            <th>Data</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {{range .Records}}
+                                        <tr>
+                                            <td>{{.Name}}</td>
+                                            <td><span class="badge bg-light text-dark border">{{.Type}}</span></td>
+                                            <td class="text-nowrap">{{.TTL}}</td>
+                                            <td>
+                                                {{if .Disabled}}
+                                                    <span class="badge bg-danger">Disabled</span>
+                                                {{else}}
+                                                    <span class="badge bg-success">Active</span>
+                                                {{end}}
+                                            </td>
+                                            <td class="text-truncate" style="max-width: 250px;" title="{{.Content}}">{{.Content}}</td>
+                                        </tr>
+                                        {{end}}
+                                    </tbody>
+                                </table>
+                        </div>
+                        <!--end::Body-->
+                    </div>
+                    <!--end::Records Card-->
+                    {{end}}
+
+                </div>
+                <!--end::col-12-->
+
+            </div>
+            <!--end::Row-->
+        </div>
+        <!--end::Container-->
+    </div>
+    <!--end::App Content-->
+</main>
+<!--end::App Main-->
+
+<!-- Delete Zone Modal -->
+<div class="modal fade" id="deleteZoneModal" tabindex="-1" aria-labelledby="deleteZoneModalLabel">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-danger text-white">
+                <h5 class="modal-title" id="deleteZoneModalLabel">
+                    <i class="bi bi-exclamation-triangle me-1"></i> Delete Zone
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="callout callout-warning">
+                    The zone <strong>{{.Form.Name}}</strong> and all its DNS records will be deleted.
+                    This can be undone from the <a href="/admin/activity">Activity Log</a> if needed.
+                </div>
+                <label for="delete-zone-confirm-input" class="form-label">
+                    Type <strong>{{.Form.Name}}</strong> to confirm:
+                </label>
+                <input type="text" class="form-control" id="delete-zone-confirm-input" placeholder="Enter zone name">
+                <div class="invalid-feedback" id="delete-zone-error" style="display: none;">
+                    Zone name does not match. Please type the exact zone name.
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" id="confirm-delete-zone-btn" disabled>
+                    <i class="bi bi-trash me-1"></i> Delete Zone
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Zone settings JavaScript (zone-kind select + delete zone modal) -->
+<script src="/static/js/zone-settings.js"></script>
+
+    {{ template "partials/footer" .}}
+</div>
+<!--end::App Wrapper-->

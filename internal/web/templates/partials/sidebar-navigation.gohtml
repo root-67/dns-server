@@ -1,0 +1,162 @@
+<!--begin::Sidebar-->
+<aside class="app-sidebar bg-body-secondary shadow" data-bs-theme="dark">
+    <!--begin::Sidebar Brand-->
+    <div class="sidebar-brand">
+        <!--begin::Brand Link-->
+        <a href="#" class="brand-link">
+            <!--begin::Brand Image-->
+            <img
+                    src="{{.Brand.LogoURL}}"
+                    alt="{{.Brand.Name}}"
+                    class="brand-image opacity-75 shadow"
+            />
+            <!--end::Brand Image-->
+            <!--begin::Brand Text-->
+            <span class="brand-text fw-light">{{.Brand.Name}}</span>
+            <!--end::Brand Text-->
+        </a>
+        <!--end::Brand Link-->
+    </div>
+    <!--end::Sidebar Brand-->
+    <!--begin::Sidebar Wrapper-->
+    <div class="sidebar-wrapper">
+        <nav class="mt-2">
+            <!--begin::Sidebar Menu-->
+            <ul
+                    class="nav sidebar-menu flex-column"
+                    data-lte-toggle="treeview"
+                    role="navigation"
+                    aria-label="Main navigation"
+                    data-accordion="false"
+                    id="navigation"
+            >
+                <!-- begin Zone Management -->
+                <li class="nav-header">Zone Management</li>
+                {{ if call .hasPermission "dashboard.view" }}
+                <li class="nav-item">
+                    <a href="/dashboard" class="nav-link{{if and .Navigation (eq .Navigation.ActivePage "dashboard")}} active{{end}}">
+                        <i class="nav-icon bi bi-speedometer"></i>
+                        <p>Dashboard</p>
+                    </a>
+                </li>
+                {{ end }}
+                {{ if call .hasPermission "zone.create" }}
+                <li class="nav-item">
+                    <a href="/zone/add" class="nav-link{{if and .Navigation (eq .Navigation.ActivePage "add")}} active{{end}}">
+                        <i class="nav-icon bi bi-plus-square"></i>
+                        <p>Add Zone</p>
+                    </a>
+                </li>
+                {{ end }}
+                <!-- end Zone Management -->
+                <!-- begin Administration -->
+                <li class="nav-header">Administration</li>
+                {{ if call .hasPermission "admin.activity.log" }}
+                <li class="nav-item">
+                    <a href="/admin/activity" class="nav-link{{if and .Navigation (eq .Navigation.ActivePage "activity")}} active{{end}}">
+                        <i class="nav-icon bi bi-activity"></i>
+                        <p>Activity</p>
+                    </a>
+                </li>
+                {{ end }}
+                {{ if call .hasPermission "admin.server.config" }}
+                <li class="nav-item">
+                    <a href="/admin/server/configuration" class="nav-link{{if and .Navigation (eq .Navigation.ActivePage "configuration")}} active{{end}}">
+                        <i class="nav-icon bi bi-tools"></i>
+                        <p>Server Configuration</p>
+                    </a>
+                </li>
+                {{ end }}
+                {{ if call .hasPermission "admin.roles" }}
+                <li class="nav-item">
+                    <a href="/admin/role" class="nav-link{{if and .Navigation (eq .Navigation.ActivePage "role")}} active{{end}}">
+                        <i class="nav-icon bi bi-shield-lock"></i>
+                        <p>Roles</p>
+                    </a>
+                </li>
+                {{ end }}
+                {{ if call .hasPermission "admin.groups" }}
+                <li class="nav-item">
+                    <a href="/admin/group" class="nav-link{{if and .Navigation (eq .Navigation.ActivePage "group")}} active{{end}}">
+                        <i class="nav-icon bi bi-people"></i>
+                        <p>Groups</p>
+                    </a>
+                </li>
+                {{ end }}
+                {{ if call .hasPermission "admin.users" }}
+                <li class="nav-item">
+                    <a href="/admin/user" class="nav-link{{if and .Navigation (eq .Navigation.ActivePage "user")}} active{{end}}">
+                        <i class="nav-icon bi bi-person-vcard"></i>
+                        <p>Users</p>
+                    </a>
+                </li>
+                {{ end }}
+                {{ if call .hasPermission "admin.tags" }}
+                <li class="nav-item">
+                    <a href="/admin/tag" class="nav-link{{if and .Navigation (eq .Navigation.ActivePage "tags")}} active{{end}}">
+                        <i class="nav-icon bi bi-tags"></i>
+                        <p>Tags</p>
+                    </a>
+                </li>
+                {{ end }}
+                {{ if call .hasPermission "admin.zone.tags" }}
+                <li class="nav-item">
+                    <a href="/admin/zone-tag" class="nav-link{{if and .Navigation (eq .Navigation.ActivePage "zone-tags")}} active{{end}}">
+                        <i class="nav-icon bi bi-diagram-3"></i>
+                        <p>Zone Tags</p>
+                    </a>
+                </li>
+                {{ end }}
+                {{ if or (call .hasPermission "admin.zone.records") (call .hasPermission "admin.pdns.server") (call .hasPermission "admin.ttl.presets") (call .hasPermission "admin.branding") }}
+                <li class="nav-item{{if and .Navigation (eq .Navigation.ActiveSection "settings")}} menu-open{{end}}">
+                    <a href="#" class="nav-link{{if and .Navigation (eq .Navigation.ActiveSection "settings")}} active{{end}}">
+                        <i class="nav-icon bi bi-gear"></i>
+                        <p>
+                            Settings
+                            <i class="nav-arrow bi bi-chevron-right"></i>
+                        </p>
+                    </a>
+                    <ul class="nav nav-treeview">
+                        {{ if call .hasPermission "admin.zone.records" }}
+                        <li class="nav-item">
+                            <a href="/admin/settings/zone-records" class="nav-link{{if and .Navigation (eq .Navigation.ActivePage "zone-records")}} active{{end}}">
+                                <i class="nav-icon bi bi-card-list"></i>
+                                <p>Zone Records</p>
+                            </a>
+                        </li>
+                        {{ end }}
+                        {{ if call .hasPermission "admin.pdns.server" }}
+                        <li class="nav-item">
+                            <a href="/admin/settings/pdns-server" class="nav-link{{if and .Navigation (eq .Navigation.ActivePage "pdns-server")}} active{{end}}">
+                                <i class="nav-icon bi bi-server"></i>
+                                <p>PDNS Server</p>
+                            </a>
+                        </li>
+                        {{ end }}
+                        {{ if call .hasPermission "admin.ttl.presets" }}
+                        <li class="nav-item">
+                            <a href="/admin/settings/ttl-presets" class="nav-link{{if and .Navigation (eq .Navigation.ActivePage "ttl-presets")}} active{{end}}">
+                                <i class="nav-icon bi bi-clock"></i>
+                                <p>TTL Presets</p>
+                            </a>
+                        </li>
+                        {{ end }}
+                        {{ if call .hasPermission "admin.branding" }}
+                        <li class="nav-item">
+                            <a href="/admin/settings/branding" class="nav-link{{if and .Navigation (eq .Navigation.ActivePage "branding")}} active{{end}}">
+                                <i class="nav-icon bi bi-palette"></i>
+                                <p>Branding</p>
+                            </a>
+                        </li>
+                        {{ end }}
+                    </ul>
+                </li>
+                {{ end }}
+                <!-- end Administration -->
+            </ul>
+            <!--end::Sidebar Menu-->
+        </nav>
+    </div>
+    <!--end::Sidebar Wrapper-->
+</aside>
+<!--end::Sidebar-->

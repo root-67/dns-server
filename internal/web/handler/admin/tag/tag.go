@@ -1,0 +1,254 @@
+// Package tag provides the admin handler for managing zone-access tags.
+package tag
+
+import (
+	"errors"
+	"strconv"
+
+	"github.com/gofiber/fiber/v3"
+	"github.com/rs/zerolog/log"
+	"gorm.io/gorm"
+
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/auth"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/config"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/db/models"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/web/handler"
+	"github.com/GoPowerDNS-Admin/GoPowerDNS-Admin/internal/web/navigation"
+)
+
+const (
+	// PathList is the path for the tag list.
+	PathList = handler.RootPath + "admin/tag"
+	// PathNew is the path for creating a new tag.
+	PathNew = handler.RootPath + "admin/tag/new"
+	// PathEdit is the path for editing a tag.
+	PathEdit = handler.RootPath + "admin/tag/:id/edit"
+	// PathDelete is the path for deleting a tag.
+	PathDelete = handler.RootPath + "admin/tag/:id/delete"
+
+	templateList = "admin/tag/list"
+	templateForm = "admin/tag/form"
+
+	navSection    = "admin"
+	navSubsection = "tags"
+
+	labelTags    = "Tags"
+	labelNewTag  = "New Tag"
+	labelEditTag = "Edit Tag"
+
+	errTagNotFound    = "Tag not found"
+	errFailedLoadTag  = "Failed to load tag"
+	errNameRequired   = "Name is required"
+	errInvalidFormData = "Invalid form data"
+	errInvalidTagID   = "Invalid tag ID"
+)
+
+// Service is the tag handler service.
+type Service struct {
+	handler.Service
+	cfg         *config.Config
+	db          *gorm.DB
+	authService *auth.Service
+}
+
+// Handler is the tag handler.
+var Handler = Service{}
+
+// Init initializes the tag handler.
+func (s *Service) Init(app *fiber.App, cfg *config.Config, db *gorm.DB, authService *auth.Service) {
+	s.cfg = cfg
+	s.db = db
+	s.authService = authService
+
+	app.Get(PathList, auth.RequirePermission(authService, auth.PermAdminTags), s.List)
+	app.Get(PathNew, auth.RequirePermission(authService, auth.PermAdminTags), s.New)
+	app.Post(PathNew, auth.RequirePermission(authService, auth.PermAdminTags), s.Create)
+	app.Get(PathEdit, auth.RequirePermission(authService, auth.PermAdminTags), s.Edit)
+	app.Post(PathEdit, auth.RequirePermission(authService, auth.PermAdminTags), s.Update)
+	app.Post(PathDelete, auth.RequirePermission(authService, auth.PermAdminTags), s.Delete)
+}
+
+// List renders the tag list page.
+func (s *Service) List(c fiber.Ctx) error {
+	nav := navigation.NewContext(labelTags, navSection, navSubsection).
+		AddBreadcrumb("Home", "/", false).
+		AddBreadcrumb("Admin", "/admin", false).
+		AddBreadcrumb(labelTags, PathList, true)
+
+	var tags []models.Tag
+	if err := s.db.Order(handler.OrderNameASC).Find(&tags).Error; err != nil {
+		log.Error().Err(err).Msg("failed to list tags")
+		return handler.RenderError(c, fiber.StatusInternalServerError, "Database Error", "Failed to load tags", nil)
+	}
+
+	return c.Render(templateList, fiber.Map{
+		"Navigation": nav,
+		"Tags":       tags,
+	}, handler.BaseLayout)
+}
+
+// New renders the 'create tag form'.
+func (s *Service) New(c fiber.Ctx) error {
+	nav := navigation.NewContext(labelNewTag, navSection, navSubsection).
+		AddBreadcrumb("Home", "/", false).
+		AddBreadcrumb("Admin", "/admin", false).
+		AddBreadcrumb(labelTags, PathList, false).
+		AddBreadcrumb(labelNewTag, PathNew, true)
+
+	return c.Render(templateForm, fiber.Map{
+		"Navigation": nav,
+		"IsCreate":   true,
+		"Tag":        models.Tag{},
+	}, handler.BaseLayout)
+}
+
+// Create handles the create tag form submission.
+func (s *Service) Create(c fiber.Ctx) error {
+	nav := navigation.NewContext(labelNewTag, navSection, navSubsection).
+		AddBreadcrumb("Home", "/", false).
+		AddBreadcrumb("Admin", "/admin", false).
+		AddBreadcrumb(labelTags, PathList, false).
+		AddBreadcrumb(labelNewTag, PathNew, true)
+
+	var in struct {
+		Name        string `form:"name"`
+		Description string `form:"description"`
+	}
+
+	if err := c.Bind().Body(&in); err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString(errInvalidFormData)
+	}
+
+	if in.Name == "" {
+		return c.Render(templateForm, fiber.Map{
+			"Navigation": nav,
+			"IsCreate":   true,
+			"Tag":        models.Tag{Name: in.Name, Description: in.Description},
+			"Error":      errNameRequired,
+		}, handler.BaseLayout)
+	}
+
+	tag := models.Tag{
+		Name:        in.Name,
+		Description: in.Description,
+	}
+
+	if err := s.db.Create(&tag).Error; err != nil {
+		log.Error().Err(err).Msg("failed to create tag")
+
+		return c.Render(templateForm, fiber.Map{
+			"Navigation": nav,
+			"IsCreate":   true,
+			"Tag":        tag,
+			"Error":      "Failed to create tag: " + err.Error(),
+		}, handler.BaseLayout)
+	}
+
+	return c.Redirect().To(PathList)
+}
+
+// Edit renders the edit tag form.
+func (s *Service) Edit(c fiber.Ctx) error {
+	id := fiber.Params[uint](c, "id")
+
+	var tag models.Tag
+	if err := s.db.First(&tag, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.Status(fiber.StatusNotFound).SendString(errTagNotFound)
+		}
+
+		return handler.RenderError(c, fiber.StatusInternalServerError, "Database Error", errFailedLoadTag, nil)
+	}
+
+	nav := navigation.NewContext(labelEditTag, navSection, navSubsection).
+		AddBreadcrumb("Home", "/", false).
+		AddBreadcrumb("Admin", "/admin", false).
+		AddBreadcrumb(labelTags, PathList, false).
+		AddBreadcrumb(labelEditTag, "", true)
+
+	return c.Render(templateForm, fiber.Map{
+		"Navigation": nav,
+		"IsCreate":   false,
+		"Tag":        tag,
+	}, handler.BaseLayout)
+}
+
+// Update handles the edit tag form submission.
+func (s *Service) Update(c fiber.Ctx) error {
+	id := fiber.Params[uint](c, "id")
+
+	var tag models.Tag
+	if err := s.db.First(&tag, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.Status(fiber.StatusNotFound).SendString(errTagNotFound)
+		}
+
+		return handler.RenderError(c, fiber.StatusInternalServerError, "Database Error", errFailedLoadTag, nil)
+	}
+
+	nav := navigation.NewContext(labelEditTag, navSection, navSubsection).
+		AddBreadcrumb("Home", "/", false).
+		AddBreadcrumb("Admin", "/admin", false).
+		AddBreadcrumb(labelTags, PathList, false).
+		AddBreadcrumb(labelEditTag, "", true)
+
+	var in struct {
+		Name        string `form:"name"`
+		Description string `form:"description"`
+	}
+
+	if err := c.Bind().Body(&in); err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString(errInvalidFormData)
+	}
+
+	if in.Name == "" {
+		return c.Render(templateForm, fiber.Map{
+			"Navigation": nav,
+			"IsCreate":   false,
+			"Tag":        tag,
+			"Error":      errNameRequired,
+		}, handler.BaseLayout)
+	}
+
+	tag.Name = in.Name
+	tag.Description = in.Description
+
+	if err := s.db.Save(&tag).Error; err != nil {
+		log.Error().Err(err).Msg("failed to update tag")
+
+		return c.Render(templateForm, fiber.Map{
+			"Navigation": nav,
+			"IsCreate":   false,
+			"Tag":        tag,
+			"Error":      "Failed to update tag: " + err.Error(),
+		}, handler.BaseLayout)
+	}
+
+	return c.Redirect().To(PathList)
+}
+
+// Delete handles tag deletion.
+func (s *Service) Delete(c fiber.Ctx) error {
+	idStr := c.Params("id")
+
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).SendString(errInvalidTagID)
+	}
+
+	var tag models.Tag
+	if err = s.db.First(&tag, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.Status(fiber.StatusNotFound).SendString(errTagNotFound)
+		}
+
+		return handler.RenderError(c, fiber.StatusInternalServerError, "Database Error", errFailedLoadTag, nil)
+	}
+
+	if err = s.db.Delete(&tag).Error; err != nil {
+		log.Error().Err(err).Msg("failed to delete tag")
+		return handler.RenderError(c, fiber.StatusInternalServerError, "Delete Failed", "Failed to delete tag", nil)
+	}
+
+	return c.Redirect().To(PathList)
+}

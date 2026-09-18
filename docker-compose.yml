@@ -1,0 +1,42 @@
+services:
+    app:
+       image: ghcr.io/gopowerdns-admin/gopowerdns-admin:latest
+       pull_policy: always
+       restart: always
+       ports:
+         - "8080:8080"
+       depends_on:
+         - pdns
+       volumes:
+         - ./config:/etc/go-pdns
+         - gopowerdns-data:/var/lib/go-pdns
+       environment:
+         GPDNS_WEBSERVER_URL: "https://"
+         GPDNS_WEBSERVER_DOMAIN: ""
+         GPDNS_WEBSERVER_COOKIEENCRYPTIONKEY: ""
+         GPDNS_WEBSERVER_ARGON2SALT: ""
+         GPDNS_PDNS_APISERVERURL:
+         GPDNS_PDNS_APIKEY:
+         GPDNS_PDNS_VHOST:
+
+
+    pdns:
+       image: ghcr.io/root-67/pdns-mysql:latest
+       restart: unless-stopped
+       ports:
+         - "5353:5353"
+         - "5353:5353/udp"
+       command:
+         - "--local-port=5353"
+         - "--webserver=yes"
+         - "--webserver-address=0.0.0.0"
+         - "--webserver-port=8081"
+         - "--webserver-allow-from=0.0.0.0/0"
+         - "--api=yes"
+         - "--api-key=${PDNS_KEY}"
+         - "--default-soa-edit=INCEPTION-INCREMENT"
+
+volumes:
+   gopowerdns-data:
+
+
